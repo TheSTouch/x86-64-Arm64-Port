@@ -181,36 +181,31 @@ of Coffee Stain's own) checks the overlay itself before any recovered code is in
 | 4 | Native main menu, with the rest of FactoryGame still stubs | The menu's C++ classes recovered |
 | 5 | Native: load a save and walk around | Most of FactoryGame recovered |
 
-### Step 1: where it stands (2026-11-01)
+### Step 1: where it stands (2026-11-02)
 
-Done: `FactoryPreEarlyLoadingScreen` is written in full (24 functions, 11,333 bytes, each on its PDB
-lines) with the `RECOMP_WATERMARK` switch; `./port overlay` and `./port run --overlay` work on the real
-install (an overlay with the shipped DLL copied in is at `/Volumes/SMART/TheSTouch/satisfactory-overlay`,
-ready for the baseline run); `./port decomp --match` compares objects. Nothing is compiled yet. Missing,
-in order:
+Each milestone is validated on Windows first (matched against the shipped module, then run in the shipped
+game), and only then built natively on the Mac and compared: the two tracks run side by side on the same
+engine tag, `5.6.1-css-83`.
 
-1. **Engine access** (the owner). Neither GitHub account (TheSTouch, stan69b) can read
-   `EpicGames/UnrealEngine` or `satisfactorymodding/UnrealEngine` ("Repository not found", checked
-   2026-11-01). Link one account to an Epic Games account (Epic's account settings, Apps and Accounts,
-   GitHub), accept the EpicGames organisation's invitation, then follow the modding docs' engine page.
-   The modding docs also offer a prebuilt `5.6.1-CSS` editor for Windows; an installed engine carries the
-   headers and Win64 import libraries a game module needs, which may be enough for step 1 without
-   building the engine.
-2. **The compiler** (the Windows PC). Visual Studio 2022 with the "MSVC v143 x64/x86 build tools
-   (v14.38-17.8)" component and Windows SDK 10.0.22621; UBT pinned to it in `BuildConfiguration.xml`
-   (`<WindowsPlatform><CompilerVersion>14.38.33130</CompilerVersion></WindowsPlatform>`). msvc-wine on the
-   Mac was not tried: without the engine's headers it has nothing of ours to compile.
-3. **The build** (the Windows PC). A project with FactoryGame's headers, such as the modding starter
-   project, with `FactoryPreEarlyLoadingScreen` assembled as the recovered-code repository's `STATUS.md`
-   says; target `FactoryGameSteam`, Win64, Shipping, so the DLL's name and its imports
-   (`FactoryGameSteam-Core-Win64-Shipping.dll`...) are the game's. Two builds: plain, for matching, and
-   with `RECOMP_WATERMARK=1`. Bring back to SMART (never to a remote) both DLLs and the plain build's
-   objects (`Intermediate/Build/Win64/x64/FactoryGameSteam/Shipping/FactoryPreEarlyLoadingScreen/*.obj`).
-4. **On the Mac.** `./port decomp <shipped dll> --match <obj>` for each of the three objects, to fix what
-   differs; `./port overlay satisfactory /Volumes/SMART/TheSTouch/satisfactory-overlay --dll <watermark
-   dll>`; the owner starts `./port run satisfactory --overlay /Volumes/SMART/TheSTouch/satisfactory-overlay
-   --kettle` (after `./port steam signin` if Kettle is not signed in): first once as the overlay stands
-   now, with the shipped DLL, then with ours.
+- **Windows (the owner's PC, `ssh windows`).** MSVC 14.38.33130 and Windows SDK 10.0.22621 in Visual Studio
+  2022, the modding community's prebuilt `5.6.1-css-83` editor (which carries the `FactoryGameSteam` Win64
+  Shipping libraries), and a minimal project holding only the recovered modules with Coffee Stain's target
+  rules. `FactoryPreEarlyLoadingScreen` builds, and 22 of its 24 functions (10,258 of 11,333 bytes) match the
+  shipped DLL byte for byte, `SFGMinimalLoadingScreen::Construct` (6,069 bytes) included. The two that differ
+  do so in inlined engine code (register allocation in FString path building, the load order of a vector's
+  halves); pure engine functions differ too, because the public engine is older than the game's.
+- **The game's build settings.** The game was built with checks in Shipping (`-UseChecksInShipping`, so
+  `DO_CHECK=1`): delegates then carry the multithreading access detector and every `TAttribute` is 8 bytes
+  bigger. A module built without it does not have the game's ABI. UBT pins the compiler with
+  `-CompilerVersion=14.38.33130`, and needs `-NoUBTMakefiles` when only an environment switch changed.
+- **Mac.** The engine source (`5.6.1-css-83`) is on SMART with its Mac dependencies. Unreal 5.6 accepts
+  Xcode 15.2 to 16.9; with Xcode 26.6 the local clone raises `MaxVersion` in `Apple_SDK.json` and turns off
+  the new clang warnings 5.6 code trips (`AppleToolChain.cs`). The first target is `UnrealGame` for macOS
+  arm64.
+- **For the owner.** Two overlays are ready: `/Volumes/SMART/TheSTouch/satisfactory-overlay` (the shipped DLL,
+  the baseline) and `/Volumes/SMART/TheSTouch/satisfactory-overlay-recomp` (ours, with the watermark). Start
+  each with `./port run satisfactory --overlay <folder> --kettle`; the second should show "recomp: 1 modules,
+  24 functions" on the early loading screen.
 
 ## First milestone: the early loading screen, native
 
@@ -233,8 +228,8 @@ loading a save.
 Before starting, the owner has to act:
 
 - **Engine access.** Link the owner's GitHub account to Epic and follow the modding docs' steps to the
-  `5.6.1-CSS` repository (not done on 2026-11-01: see "Step 1: where it stands"). The engine source stays
-  outside this repository.
+  `5.6.1-CSS` repository (done on 2026-11-02 for TheSTouch, with the modding community's linker). The engine
+  source stays outside this repository.
 - **Recovered code lives on the owner's disks only** (decided 2026-11-01): see below.
 
 ## Where recovered code lives
