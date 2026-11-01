@@ -149,7 +149,25 @@ It stays the fallback if the engine's source cannot be had.
 5. **Engine knowledge.** Coffee Stain's fork itself, with Epic's Mac and iOS targets. The modding docs
    name a clang 18 cross-compile toolchain for Linux, so the fork already builds with clang. The
    Porting Kit phase's settings and MoltenVK findings carry over unchanged, because the renderer is the same.
-6. **First milestone**: below.
+6. **First milestone**: below, as step 3 of the playable steps; steps 1 and 2 come first, in the shipped game.
+
+## Playable steps
+
+Each step is something the owner runs and sees, so the recovery shows progress long before the native
+build. The first ones run in the shipped game under the Porting Kit, swapping Coffee Stain's code for
+the recovered code a piece at a time, the way OpenRCT2 replaced RollerCoaster Tycoon's functions one by
+one and the way SML already hooks FactoryGame's functions. Nothing in the game's folder changes: the
+game runs from an overlay folder on SMART (its own `Binaries`, everything else linked to the install),
+started with the Kettle launch mode.
+
+| Step | What you see | Needs |
+|---|---|---|
+| 0 | The shipped game on the Porting Kit, and `STATUS.md` in the recovered-code repository: functions written and matched, by module | done |
+| 1 | The game starts with **our** `FactoryPreEarlyLoadingScreen` DLL, built from recovered source for Win64, in place of Coffee Stain's. A `RECOMP_WATERMARK` build (off when matching) prints "recomp: N modules, M functions" on the loading screen | `5.6.1-CSS` built for Win64 (import libraries), MSVC 14.38.33130 (msvc-wine on the Mac, or the Windows PC), `./port run --overlay` |
+| 2 | More of the game is ours each time: whole small modules swapped (FactoryMessagingTypes, then Coffee Stain's plugins), and inside FactoryGame, each recovered function hooked over the shipped one by a loader DLL. The watermark's counters grow; the game must keep playing | A hook loader (SML's approach), the matching harness |
+| 3 | The native milestone below: the Mac build of the engine draws the early loading screen from recovered code | Step 1's module, the engine built for macOS arm64 |
+| 4 | Native main menu, with the rest of FactoryGame still stubs | The menu's C++ classes recovered |
+| 5 | Native: load a save and walk around | Most of FactoryGame recovered |
 
 ## First milestone: the early loading screen, native
 
