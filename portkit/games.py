@@ -22,6 +22,12 @@ NOT_THE_GAME = re.compile(
 )
 
 
+# How a game starts: "steam" through Windows Steam in the prefix (-applaunch); "kettle" its own
+# executable with our steam_api64.dll, Steam reached through Kettle (portkit/kettle.py), no Windows
+# Steam; "exe" its executable alone, for games without Steam.
+LAUNCH_MODES = ("steam", "kettle", "exe")
+
+
 def _norm(s):
     return re.sub(r"[^a-z0-9]", "", s.lower())
 
@@ -93,7 +99,7 @@ class Game:
                 shipping = sorted(self.root.glob(f"*/Binaries/Win64/{stem}-Win64-Shipping.exe"))
                 if shipping:
                     self.process = shipping[0].name
-        if not self.steam_appid and self.launch == "steam":
+        if not self.steam_appid and self.launch in ("steam", "kettle"):
             missing.append("steam_appid")
         if not self.root or not self.root.is_dir():
             missing.append("install_dir")
@@ -123,6 +129,8 @@ def load(game_id):
         data = tomllib.load(f)
     data.setdefault("id", game_id)
     data["env"] = {k: str(v) for k, v in data.get("env", {}).items()}
+    if data.get("launch", "steam") not in LAUNCH_MODES:
+        raise Fail(f"games/{game_id}.toml: launch = {data['launch']!r}, expected one of {', '.join(LAUNCH_MODES)}")
     game = Game(**data)
     game.resolve()
     return game

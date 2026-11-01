@@ -20,6 +20,16 @@ def _env_pairs(pairs):
     return env
 
 
+def _game(a):
+    """The game a run/bench/trace names, with this run's --arg and --kettle."""
+    g = games.load(a.game)
+    if a.game_args:
+        g.args = a.game_args
+    if a.kettle:
+        g.launch = "kettle"
+    return g
+
+
 def cmd_doctor(a):
     checks = []
 
@@ -50,6 +60,9 @@ def cmd_doctor(a):
                   f"  prefix {name}", fix=f"./port setup --runtime {name}")
             check(True if steam.installed(name) else None, f"  Windows Steam in {name}",
                   fix=f"./port setup --runtime {name}")
+    info = kettle.token_info(kettle.stored_token())
+    check(True if info else None, "Steam sign-in for the Kettle launch mode",
+          f"SteamID {info['steamid']}" if info else "none", "./port steam signin")
     for gid in games.all_ids():
         g = games.load(gid)
         missing = g.resolve()
@@ -160,22 +173,18 @@ def cmd_inspect(a):
 
 
 def cmd_run(a):
-    g = games.load(a.game)
-    if a.game_args:
-        g.args = a.game_args
+    g = _game(a)
     session.ready(g)
     env = {"MTL_HUD_ENABLED": "1"} if a.hud else {}
     env.update(_env_pairs(a.env))
     log = session.report_dir(g, "run") / "wine.log"
     session.start(g, extra_env=env, log=log, fresh=not a.keep_steam)
-    step(f"Output of Steam and the game: {log}")
+    step(f"Output of {'the game' if g.launch == 'kettle' else 'Steam and the game'}: {log}")
     return 0
 
 
 def cmd_bench(a):
-    g = games.load(a.game)
-    if a.game_args:
-        g.args = a.game_args
+    g = _game(a)
     bench.run(g, duration=a.duration, warmup=a.warmup, label=a.label, note=a.note, hud=not a.no_hud,
               instruments=not a.no_instruments, template=a.template, timeout=a.timeout, quit=a.quit,
               extra_env=_env_pairs(a.env), attach=a.attach)
@@ -183,9 +192,7 @@ def cmd_bench(a):
 
 
 def cmd_trace(a):
-    g = games.load(a.game)
-    if a.game_args:
-        g.args = a.game_args
+    g = _game(a)
     out = trace.run(g, channels=a.channels, relay=a.relay, dump_metal=a.dump_metal,
                     sample_seconds=a.sample, sample_at=a.sample_at, timeout=a.timeout,
                     extra_env=_env_pairs(a.env))
@@ -237,6 +244,8 @@ def parser():
         sp.add_argument("--env", action="append", metavar="KEY=VALUE", help="extra environment, repeatable")
         sp.add_argument("--arg", action="append", dest="game_args", metavar="ARG",
                         help="game argument, repeatable; replaces the game file's args")
+        sp.add_argument("--kettle", action="store_true",
+                        help="launch = kettle for this run: our steam_api64.dll, no Windows Steam")
         return sp
 
     sp = game_cmd("run", "play a game under the Porting Kit")

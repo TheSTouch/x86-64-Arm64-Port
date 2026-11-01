@@ -4,7 +4,7 @@ import json
 import platform
 import subprocess
 
-from . import config, runtime, steam, wine
+from . import config, kettle, runtime, steam, wine
 from .util import Fail, step, sysctl, timestamp
 
 
@@ -22,6 +22,9 @@ def start(game, *, debug="-all", extra_env=None, log=None, fresh=True):
 
     Through Steam, the game is Steam's child and inherits Steam's environment,
     so Steam is restarted for each run that sets its own variables (fresh=True).
+    With Kettle, the game starts as Steam would start it, without Windows Steam:
+    the prefix is stopped first (fresh=True), so a Windows Steam signed in there
+    does not play beside it.
     """
     env = {**game.env, **(extra_env or {})}
     if game.launch == "steam":
@@ -30,6 +33,16 @@ def start(game, *, debug="-all", extra_env=None, log=None, fresh=True):
             steam.stop(game.prefix)
         step(f"Starting {game.name} through Steam (app {game.steam_appid})")
         return steam.start(game.prefix, ["-applaunch", game.steam_appid, *game.args], debug, env, log)
+    if game.launch == "kettle":
+        if fresh:
+            step(f"Stopping prefix {game.prefix} (Windows Steam included): Kettle stands in for it")
+            steam.stop(game.prefix)
+        root = kettle.build_bridge()
+        steam_log = log.parent / "steam_api.log" if log else None
+        env.update(kettle.environment(game, root, steam_log, env))
+        exe = game.launcher_path
+        step(f"Starting {exe} with our steam_api64.dll (Steam through Kettle, app {game.steam_appid})")
+        return wine.spawn(game.prefix, [exe, *game.args], debug, env, log, cwd=exe.parent)
     step(f"Starting {game.exe_path}")
     return wine.spawn(game.prefix, [game.exe_path, *game.args], debug, env, log, cwd=game.exe_path.parent)
 
