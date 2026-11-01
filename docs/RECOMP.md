@@ -26,6 +26,7 @@ process is translated. The case for a native build is:
 | Porting Kit trace | Windows DLLs Wine stands in for, the game's own DLLs, unimplemented and failing calls | `./port trace <game>` |
 | Relay trace | Every Windows API function called and from where: the runtime's surface, plus call sites that seed code discovery | `./port trace <game> --relay` |
 | Coverage on the Windows PC | Every code address that runs, indirect jump and call targets included: ground truth for code discovery | DynamoRIO `drcov`, on the PC the game was bought on (to set up) |
+| Vulkan shaders and pipelines | For a game on its Vulkan renderer (Satisfactory): every SPIR-V module it creates, and the layouts of pipelines MoltenVK refuses, which SPIRV-Cross turns into Metal offline | `IMAGELOG_DUMP` with [layers/imagelog](../layers/imagelog) ([docs/SATISFACTORY.md](SATISFACTORY.md)) |
 | Shaders | DXIL shaders converted offline to Metal with Apple's Metal Shader Converter, the converter D3DMetal itself uses (`libmetalirconverter`). Checked against an Xcode GPU frame capture of the Porting Kit run | (to set up) |
 
 Rosetta's output is not an input. Its arm64 code is the x86-64 code with x86 registers pinned to

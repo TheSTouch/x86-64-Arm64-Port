@@ -6,7 +6,7 @@ There are two routes, and each game uses the best one it has:
 
 | Route | What it is | Where | Status |
 |---|---|---|---|
-| **Porting Kit** | Runs the Windows game as it is, translated at run time: Wine for Windows, a graphics translator to Metal, Rosetta 2 for x86-64 → arm64. Also the benchmark and the observation post for the recompilation. | Mac | Steam runs; first game reaches its menu map |
+| **Porting Kit** | Runs the Windows game as it is, translated at run time: Wine for Windows, a graphics translator to Metal, Rosetta 2 for x86-64 → arm64. Also the benchmark and the observation post for the recompilation. | Mac | Steam runs; first game reaches its main menu |
 | **Native recompilation** | A per-game project: the game's x86-64 code translated ahead of time into a native arm64 binary, with its own stand-ins for Windows and DirectX. The only route to iOS, which forbids the run-time translation Rosetta does. | Mac, iOS | Planned per game, after the Porting Kit benchmark |
 
 > **Your games, your devices.** This repository holds tools only. Game files, recompiled
@@ -17,7 +17,7 @@ There are two routes, and each game uses the best one it has:
 
 | Game | Porting Kit | Native recompilation |
 |---|---|---|
-| Satisfactory (Steam, Unreal Engine 5.6) | `wine11`, Vulkan on MoltenVK: renders, then quits loading the menu map (MoltenVK refuses an uncompressed view of a compressed texture) | Not planned yet |
+| Satisfactory (Steam, Unreal Engine 5.6) | `wine11`, Vulkan on MoltenVK 1.4.2: reaches the main menu; the menu's 3D scene does not render correctly yet, and some runs stop on a GPU timeout. Details: [docs/SATISFACTORY.md](docs/SATISFACTORY.md) | Not planned yet |
 | STAR WARS: Galactic Racer (Steam, 2026) | Waiting for a Steam copy of the game | To plan after the benchmark ([docs/RECOMP.md](docs/RECOMP.md)) |
 
 Each game has a file in [games/](games/). Fields left empty are filled from the Steam library once
@@ -41,7 +41,7 @@ it uses. Downloads are pinned by checksum in [portkit/config.py](portkit/config.
 
 | Runtime | What | Status |
 |---|---|---|
-| `wine11` (default) | [Gcenx's Wine Staging 11.21](https://github.com/Gcenx/macOS_Wine_builds), Direct3D through wined3d on Vulkan, MoltenVK bundled | Today's Windows Steam runs, with the fixes below. DXMT cannot load yet: this Wine's Mac driver does not export the Metal view functions DXMT needs |
+| `wine11` (default) | [Gcenx's Wine Staging 11.21](https://github.com/Gcenx/macOS_Wine_builds), Direct3D through wined3d on Vulkan, with Khronos's [MoltenVK 1.4.2](https://github.com/KhronosGroup/MoltenVK/releases/tag/v1.4.2) in place of the bundled 1.4.0 | Today's Windows Steam runs, with the fixes below. Unreal 5 games run on Vulkan. DXMT cannot load yet: this Wine's Mac driver does not export the Metal view functions DXMT needs |
 | `gptk` | [Gcenx's build](https://github.com/Gcenx/game-porting-toolkit) of Apple's Game Porting Toolkit 3.0: Wine 7.7 + D3DMetal (DirectX 11/12) | Today's Windows Steam crashes on it (Wine 7.7's bcrypt does not know `BCRYPT_RNG_ALG_HANDLE`), so Steam games cannot start. D3DMetal is Apple's, under [Apple's license](https://developer.apple.com/games) |
 
 Windows Steam on `wine11` needs three things, all applied by `./port steam start`:
@@ -54,7 +54,34 @@ Windows Steam on `wine11` needs three things, all applied by `./port steam start
   [play-windows-steam-on-mac](https://github.com/ramiabih/play-windows-steam-on-mac);
 - `-noverifyfiles -norepairfiles`, so Steam does not restore its own helper over the wrapper.
 
+`./port setup` lays the MoltenVK release a runtime names (`"moltenvk"` in
+[portkit/config.py](portkit/config.py)) over the one Wine bundles, and keeps the bundled library as
+`libMoltenVK.dylib.bundled`; re-running it on an installed runtime does only that. 1.4.1 and later
+support the uncompressed views of compressed textures that Unreal 5's runtime virtual textures
+need. Khronos has since deprecated MoltenVK in favour of KosmicKrisp on Apple Silicon; Wine's Unix
+side runs as x86-64 under Rosetta, so a driver for it has to be built for x86-64.
+
 Wine's windows show up as "wine" in the Dock and do not come to the front by themselves.
+
+## Games without Windows Steam: the Kettle launch mode
+
+A Steam game can also start under Wine without Windows Steam: it then loads our own
+`steam_api64.dll`, which reaches Steam through [Kettle](https://github.com/TheSTouch/kettle) (signed
+in as you, with Steam signing the game's ownership ticket). It is not a Steam emulator: without a
+sign-in or a license the game is told there is no Steam.
+
+```sh
+./port steam signin                  # once: a QR code in the terminal (or ./port steam signin <account>)
+./port steam status                  # the sign-in Kettle holds
+./port steam check satisfactory      # sign-in and license through the DLL, without the game
+./port run satisfactory --kettle     # the game, no Windows Steam (or launch = "kettle" in its file)
+```
+
+Wine loads the DLL as a builtin in place of the game's own; the game's folder is never changed.
+Cloud saves, achievements, stats and networking answer "nothing" for now.
+[steam_api/README.md](steam_api/README.md) describes the bridge, and
+[steam_api/satisfactory-interfaces.md](steam_api/satisfactory-interfaces.md) lists what
+Satisfactory asks Steam for (`./port steam inventory <game>` records it for any game).
 
 ## Getting started
 
@@ -73,6 +100,12 @@ and each run sets its own variables. `--keep-steam` skips the restart. `--arg` r
 file's arguments for one run. Each run's Wine, Steam and game output goes to
 `reports/<game>/<time>-run/wine.log`.
 
+Unreal's shipping builds ignore `-dpcvars=`, but apply `-ini:Engine:[SystemSettings]:<cvar>=<value>`
+on the command line, so a game file's `args` can carry console variables (Satisfactory's does). To
+see what a game asks of Vulkan, [layers/imagelog](layers/imagelog) is a Vulkan layer that logs
+refused images and dumps failing pipelines with a tool to replay them
+([docs/SATISFACTORY.md](docs/SATISFACTORY.md) shows it in use).
+
 `ROSETTA_ADVERTISE_AVX=1` is set for every game, because most recent games need AVX2 and Rosetta
 hides it otherwise. A game's `[env]` table and `--env KEY=VALUE` add or override variables.
 
@@ -83,10 +116,12 @@ hides it otherwise. A game's `[env]` table and `--env KEY=VALUE` add or override
 | `./port doctor` | Checks the Mac, each runtime, its prefix and Steam, and each game |
 | `./port setup` | Installs a runtime, creates its prefix, installs Windows Steam |
 | `./port steam start\|stop\|install\|library <folder>` | Manages Windows Steam in the prefix |
+| `./port steam signin [account]\|status` | Signs in to Steam through Kettle, for the Kettle launch mode, and shows the sign-in |
+| `./port steam check\|inventory <game>` | Checks a game's sign-in and license through our `steam_api64.dll`; runs a game with a logging `steam_api64.dll` and lists what it asks Steam for |
 | `./port wine -- <program>` | Runs a program in the prefix (`winecfg`, `regedit`, an installer) |
 | `./port games [id]` | Shows each game's resolved settings and whether it is ready |
 | `./port inspect <game\|folder\|file>` | Static report: engine, graphics API, middleware, anti-cheat, code protection, and what each route faces. Reads files only |
-| `./port run <game>` | Plays the game under the Porting Kit |
+| `./port run <game>` | Plays the game under the Porting Kit (`--kettle`: without Windows Steam) |
 | `./port bench <game>` | Benchmarks a scene (`--attach` measures the game already running) |
 | `./port trace <game>` | Watches a run for the recompilation plan |
 
@@ -147,9 +182,13 @@ instead.
   - `pe.py`: a read-only parser for Windows executables.
   - `inspect.py`: the static report.
   - `session.py`, `bench.py`, `trace.py`: running a game, benchmarking it and watching it.
+  - `kettle.py`: builds the Kettle bridge and runs games through it.
 - `games/`: one TOML file per game.
 - `wrapper/`: the Steam web helper wrapper (Windows C, built with Zig).
+- `steam_api/`: our `steam_api64.dll` and its Mac side, on Kettle (`vendor/kettle`, a submodule).
+- `layers/imagelog/`: a Vulkan layer and tools for what a game asks of the driver.
 - `docs/RECOMP.md`: how the native recompilation is planned.
+- `docs/SATISFACTORY.md`: Satisfactory on the Porting Kit, what stopped it and what fixed it.
 - `tests/`: `python3 -m unittest discover -s tests -t .`
 - `runtime/`, `prefixes/`, `reports/`: local only, ignored by git.
 
@@ -157,7 +196,7 @@ instead.
 
 [PolyForm Noncommercial 1.0.0](LICENSE), as [Mac To iOS Recomp](https://github.com/TheSTouch/Mac-To-iOS-Recomp):
 free to use, change and share for any noncommercial purpose. The runtimes and tools it downloads
-(Wine, Apple's Game Porting Toolkit, MoltenVK, DXMT, Zig, Steam) keep their own licenses.
+(Wine, Apple's Game Porting Toolkit, MoltenVK, DXMT, Zig, Steam, Kettle) keep their own licenses.
 
 ## Disclaimer
 

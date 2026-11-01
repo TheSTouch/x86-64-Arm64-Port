@@ -177,3 +177,8 @@ What the first runs, attached to the main menu, showed and changed:
   they are now listed apart. The most frequent Wine message is Vulkan's
   `VK_TIME_DOMAIN_QUERY_PERFORMANCE_COUNTER_EXT` (4058 times, Unreal's GPU timing). With `+loaddll`
   set, Windows Steam took 10 minutes to start, because Steam inherits the trace's debug channels.
+
+## Also seen
+
+- **Sound**: during one run (around 17:10) the game's sound was white noise. Not looked into yet
+  (Wwise on Wine's XAudio2 and Core Audio).
