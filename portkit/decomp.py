@@ -20,11 +20,16 @@ LINE = re.compile(r"^\s*([0-9a-f]+):\s+(.*)$")
 
 
 class Module:
+    @staticmethod
+    def pdb_of(dll):
+        path = Path(dll).with_suffix(".pdb")
+        if not path.is_file():
+            raise Fail(f"{path.name} not found next to {Path(dll).name}")
+        return path
+
     def __init__(self, dll):
         self.dll = Path(dll)
-        self.pdb = self.dll.with_suffix(".pdb")
-        if not self.pdb.is_file():
-            raise Fail(f"{self.pdb.name} not found next to {self.dll.name}")
+        self.pdb = self.pdb_of(dll)
         self.image = pe.parse(self.dll)
         self.data = self.dll.read_bytes()
         self.functions = pdb.functions(self.pdb)

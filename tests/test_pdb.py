@@ -87,7 +87,53 @@ def build_pdb():
     dbi = struct.pack("<iIIHHHHHH", -1, 19990903, 1, 0xFFFF, 0, 0xFFFF, 0, 6, 0)
     dbi += struct.pack("<iiiiiIiiHHI", len(modi), 0, 0, 0, 0, 0, 0, 0, 0, 0x8664, 0) + modi
     publics = rec(0x110E, struct.pack("<IIH", 2, 0x10, 1) + b"?Construct@FGScreen@@QEAAXAEBUFArguments@1@@Z\0")
-    return msf([b"", info_stream(7), b"", dbi, b"", module, publics, names])
+    return msf([b"", info_stream(7), build_tpi(), dbi, b"", module, publics, names])
+
+
+def leaf(kind, body):
+    """A type record: length, kind, body padded to 4 bytes."""
+    body += bytes(0xF0 + n for n in range(-(len(body) + 4) % 4, 0, -1))
+    return struct.pack("<HH", len(body) + 2, kind) + body
+
+
+def sub(kind, body):
+    """A field-list entry, padded to 4 bytes with LF_PAD bytes."""
+    out = struct.pack("<H", kind) + body
+    pad = -len(out) % 4
+    return out + bytes(0xF0 + pad - i for i in range(pad))
+
+
+def build_tpi():
+    """Types from 0x1000: a base with a virtual function, a class deriving from it, a pointer to it."""
+    T = 0x1000
+    records = [
+        # 0x1000: the base's field list: vfptr, an introducing virtual at vtable offset 0x80, an int at +8
+        leaf(0x1203, sub(0x1409, struct.pack("<HI", 0, 0x1006))
+             + sub(0x1511, struct.pack("<HII", 3 | (4 << 2), 0x1007, 0x80) + b"InitSettingsFromConfig\0")
+             + sub(0x150D, struct.pack("<HIH", 3, 0x74, 8) + b"Count\0")),
+        # 0x1001: class IBase, size 0x10
+        leaf(0x1504, struct.pack("<HHIIIH", 3, 0, T, 0, 0, 0x10) + b"IBase\0"),
+        # 0x1002: forward reference to Screen (ignored by lookups)
+        leaf(0x1504, struct.pack("<HHIIIH", 0, 0x80, 0, 0, 0, 0) + b"Screen\0"),
+        # 0x1003: Screen's field list: base IBase at +0, override of the virtual, TSharedPtr-like member at +0x40
+        leaf(0x1203, sub(0x1400, struct.pack("<HIH", 3, 0x1001, 0))
+             + sub(0x1511, struct.pack("<HI", 3 | (1 << 2), 0x1007) + b"InitSettingsFromConfig\0")
+             + sub(0x150D, struct.pack("<HIH", 1, 0x1005, 0x40) + b"mWidget\0")
+             + sub(0x150D, struct.pack("<HIH", 1, 0x20, 0x50) + b"mType\0")),
+        # 0x1004: class Screen, size 0x58
+        leaf(0x1504, struct.pack("<HHIIIH", 4, 0, 0x1003, 0, 0, 0x58) + b"Screen\0"),
+        # 0x1005: Screen*
+        leaf(0x1002, struct.pack("<II", 0x1004, 0x1000C)),
+        # 0x1006: vtable shape (unused here)
+        leaf(0x000A, struct.pack("<H", 0)),
+        # 0x1007: void (IBase::*)(const char*)
+        leaf(0x1009, struct.pack("<IIIBBHIi", 0x0003, 0x1001, 0, 0, 0, 1, 0x1008, 0)),
+        # 0x1008: argument list (const char*)
+        leaf(0x1201, struct.pack("<II", 1, 0x0670)),
+    ]
+    data = b"".join(records)
+    header = struct.pack("<IIIII", 20040203, 56, T, T + len(records), len(data)) + b"\0" * 36
+    return header + data
 
 
 class PDBTest(unittest.TestCase):
@@ -116,6 +162,19 @@ class PDBTest(unittest.TestCase):
     def test_publics(self):
         self.assertEqual(pdb.publics(self.write(build_pdb())),
                          {(1, 0x10): "?Construct@FGScreen@@QEAAXAEBUFArguments@1@@Z"})
+
+
+    def test_types(self):
+        t = pdb.Types(self.write(build_pdb()))
+        screen = t.udt("Screen")
+        self.assertEqual(screen.size, 0x58)
+        self.assertEqual(screen.bases, [("IBase", 0)])
+        self.assertEqual(screen.members, [(0x40, "mWidget", "Screen*"), (0x50, "mType", "unsigned char")])
+        self.assertEqual(t.udt("IBase").members, [(8, "Count", "int")])
+        self.assertEqual(t.vtable("Screen"), {0x80: "IBase::InitSettingsFromConfig(char*)"})
+        self.assertIsNone(t.udt("Missing"))
+        self.assertIn("+0x0040  Screen* mWidget", t.describe("Screen"))
+        self.assertIn("vtable +0x080  IBase::InitSettingsFromConfig(char*)", t.describe("Screen"))
 
 
 if __name__ == "__main__":

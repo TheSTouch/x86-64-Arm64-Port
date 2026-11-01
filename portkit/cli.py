@@ -6,7 +6,7 @@ import subprocess
 import sys
 from datetime import datetime
 
-from . import bench, config, decomp, games, inspect, kettle, runtime, session, steam, trace, wine
+from . import bench, config, decomp, games, pdb, inspect, kettle, runtime, session, steam, trace, wine
 from .util import Fail, free_gb, step, sysctl
 
 
@@ -177,6 +177,9 @@ def cmd_decomp(a):
         root, fns = decomp.dump(a.dll, a.out, a.source)
         print(f"{len(fns)} functions ({sum(f.length for f in fns)} bytes) written to {root}")
         return 0
+    if a.type:
+        print(pdb.Types(decomp.Module.pdb_of(a.dll)).describe(a.type), end="")
+        return 0
     m = decomp.Module(a.dll)
     if a.disasm:
         print(m.disassemble(m.function(a.disasm)), end="")
@@ -260,6 +263,7 @@ def parser():
     sp.add_argument("--source", help="only functions whose source path contains this (default: the game's own)")
     sp.add_argument("--all", action="store_true", help="list every function, engine templates included")
     sp.add_argument("--disasm", metavar="NAME", help="disassemble one function (name or decorated name)")
+    sp.add_argument("--type", metavar="NAME", help="a class, struct or enum: layout, members, vtable slots")
     sp.add_argument("--out", metavar="DIR", help="write functions.tsv and one .asm per function (outside this repository)")
     sp.set_defaults(fn=cmd_decomp)
 

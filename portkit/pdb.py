@@ -226,3 +226,240 @@ def _module_functions(syms, compiland, lines):
         elif inline_depth == 0 and kind == S_REGREL32:
             current.locals.append(_cstr(body, 10))
     return out
+
+
+# Type records (TPI stream). Only what describing a class needs: layouts, bases, members and virtual functions.
+LF_MODIFIER, LF_POINTER, LF_PROCEDURE, LF_MFUNCTION = 0x1001, 0x1002, 0x1008, 0x1009
+LF_ARGLIST, LF_FIELDLIST, LF_BITFIELD, LF_METHODLIST = 0x1201, 0x1203, 0x1205, 0x1206
+LF_BCLASS, LF_VBCLASS, LF_IVBCLASS, LF_INDEX, LF_VFUNCTAB = 0x1400, 0x1401, 0x1402, 0x1404, 0x1409
+LF_ENUMERATE, LF_ARRAY, LF_CLASS, LF_STRUCTURE, LF_UNION, LF_ENUM = 0x1502, 0x1503, 0x1504, 0x1505, 0x1506, 0x1507
+LF_MEMBER, LF_STMEMBER, LF_METHOD, LF_NESTTYPE, LF_ONEMETHOD = 0x150D, 0x150E, 0x150F, 0x1510, 0x1511
+UDTS = {LF_CLASS, LF_STRUCTURE, LF_UNION, LF_ENUM}
+INTRO_VIRTUAL = {4, 6}  # method property: introducing virtual, pure introducing virtual
+SIMPLE = {0x03: "void", 0x08: "HRESULT", 0x10: "signed char", 0x20: "unsigned char", 0x68: "int8", 0x69: "uint8",
+          0x70: "char", 0x71: "wchar_t", 0x7A: "char16_t", 0x7B: "char32_t", 0x7C: "char8_t",
+          0x11: "short", 0x21: "unsigned short", 0x72: "int16", 0x73: "uint16", 0x12: "long", 0x22: "unsigned long",
+          0x74: "int", 0x75: "unsigned int", 0x13: "__int64", 0x23: "unsigned __int64", 0x76: "int64", 0x77: "uint64",
+          0x40: "float", 0x41: "double", 0x30: "bool", 0x31: "bool16", 0x32: "bool32", 0x33: "bool64"}
+
+
+@dataclass
+class UDT:
+    kind: str
+    name: str
+    size: int
+    bases: list = field(default_factory=list)      # (name, offset)
+    members: list = field(default_factory=list)    # (offset, name, type)
+    methods: list = field(default_factory=list)    # (name, type, vtable offset or None)
+    statics: list = field(default_factory=list)    # (name, type)
+    enumerators: list = field(default_factory=list)  # (name, value)
+
+
+def _numeric(buf, off):
+    """A CodeView numeric leaf: (value, next offset)."""
+    v = struct.unpack_from("<H", buf, off)[0]
+    if v < 0x8000:
+        return v, off + 2
+    fmt = {0x8000: "<b", 0x8001: "<h", 0x8002: "<H", 0x8003: "<i", 0x8004: "<I", 0x8009: "<q", 0x800A: "<Q"}.get(v)
+    if not fmt:
+        return 0, off + 2
+    return struct.unpack_from(fmt, buf, off + 2)[0], off + 2 + struct.calcsize(fmt)
+
+
+class Types:
+    """The type stream, indexed lazily: udt(name), vtable(name), describe(name), name(type index)."""
+
+    def __init__(self, path):
+        with MSF(path) as m:
+            self.buf = m.read(2)
+        if len(self.buf) < 56:
+            raise NotPDB(f"{path}: no type stream")
+        _, header, self.first, self.end, size = struct.unpack_from("<IIIII", self.buf)
+        self.offsets, off = [], header
+        while off + 4 <= min(header + size, len(self.buf)):
+            self.offsets.append(off)
+            off += 2 + struct.unpack_from("<H", self.buf, off)[0]
+        self._by_name = None
+
+    def record(self, ti):
+        i = ti - self.first
+        if not 0 <= i < len(self.offsets):
+            return None, b""
+        off = self.offsets[i]
+        length, kind = struct.unpack_from("<HH", self.buf, off)
+        return kind, self.buf[off + 4:off + 2 + length]
+
+    def _index(self):
+        if self._by_name is None:
+            self._by_name = {}
+            for i, off in enumerate(self.offsets):
+                kind, prop = struct.unpack_from("<HH", self.buf, off + 2)[0], struct.unpack_from("<H", self.buf, off + 6)[0]
+                if kind in UDTS and not prop & 0x80:  # 0x80: a forward reference
+                    _, body = self.record(self.first + i)
+                    self._by_name.setdefault(self._udt_name(kind, body), self.first + i)
+        return self._by_name
+
+    @staticmethod
+    def _udt_name(kind, body):
+        if kind == LF_ENUM:
+            return _cstr(body, 12)
+        off = 4 + 4 * 3 if kind != LF_UNION else 4 + 4
+        _, off = _numeric(body, off)
+        return _cstr(body, off)
+
+    def name(self, ti, depth=0):
+        if ti < 0x1000:
+            base = SIMPLE.get(ti & 0xFF, f"T{ti & 0xFF:#x}")
+            return base + ("*" if ti >> 8 & 0xF else "")
+        if depth > 12:
+            return "..."
+        kind, body = self.record(ti)
+        if kind in UDTS:
+            return self._udt_name(kind, body)
+        if kind == LF_POINTER:
+            referent, attr = struct.unpack_from("<II", body)
+            mode = attr >> 5 & 7
+            return self.name(referent, depth + 1) + {1: "&", 4: "&&"}.get(mode, "*")
+        if kind == LF_MODIFIER:
+            ti2, mods = struct.unpack_from("<IH", body)
+            return ("const " if mods & 1 else "") + ("volatile " if mods & 2 else "") + self.name(ti2, depth + 1)
+        if kind == LF_ARRAY:
+            elem = struct.unpack_from("<I", body)[0]
+            size, _ = _numeric(body, 8)
+            return f"{self.name(elem, depth + 1)}[{size}]"
+        if kind == LF_BITFIELD:
+            ti2, length, _ = struct.unpack_from("<IBB", body)
+            return f"{self.name(ti2, depth + 1)}:{length}"
+        if kind in (LF_PROCEDURE, LF_MFUNCTION):
+            return self.signature(ti, "(*)", depth)
+        return f"<type {ti:#x}>"
+
+    def signature(self, ti, name="", depth=0):
+        kind, body = self.record(ti)
+        if kind == LF_MFUNCTION:
+            ret, _, _, _, _, _, args = struct.unpack_from("<IIIBBHI", body)
+        elif kind == LF_PROCEDURE:
+            ret, _, _, _, args = struct.unpack_from("<IBBHI", body)
+        else:
+            return name
+        _, alist = self.record(args)
+        n = struct.unpack_from("<I", alist)[0] if len(alist) >= 4 else 0
+        params = [self.name(struct.unpack_from("<I", alist, 4 + 4 * i)[0], depth + 1) for i in range(n)]
+        return f"{name}({', '.join(p for p in params if p != 'void')})"
+
+    def udt(self, name):
+        ti = self._index().get(name)
+        if ti is None:
+            return None
+        kind, body = self.record(ti)
+        if kind == LF_ENUM:
+            fields = struct.unpack_from("<I", body, 8)[0]
+            out = UDT("enum", name, 0)
+        else:
+            fields = struct.unpack_from("<I", body, 4)[0]
+            size, _ = _numeric(body, 16 if kind != LF_UNION else 8)
+            out = UDT({LF_CLASS: "class", LF_STRUCTURE: "struct", LF_UNION: "union"}[kind], name, size)
+        self._fields(fields, out)
+        return out
+
+    def _fields(self, ti, out):
+        kind, body = self.record(ti)
+        if kind != LF_FIELDLIST:
+            return
+        off = 0
+        while off + 2 <= len(body):
+            leaf = struct.unpack_from("<H", body, off)[0]
+            if leaf >= 0xF0 and leaf & 0xFF >= 0xF0:  # LF_PAD bytes
+                off += 1
+                continue
+            p = off + 2
+            if leaf == LF_BCLASS:
+                _, base = struct.unpack_from("<HI", body, p)
+                offset, p = _numeric(body, p + 6)
+                out.bases.append((self.name(base), offset))
+            elif leaf in (LF_VBCLASS, LF_IVBCLASS):
+                _, base, _ = struct.unpack_from("<HII", body, p)
+                _, p = _numeric(body, p + 10)
+                _, p = _numeric(body, p)
+                out.bases.append((self.name(base), None))
+            elif leaf == LF_MEMBER:
+                _, mtype = struct.unpack_from("<HI", body, p)
+                offset, p = _numeric(body, p + 6)
+                name = _cstr(body, p)
+                out.members.append((offset, name, self.name(mtype)))
+                p += len(name.encode()) + 1
+            elif leaf == LF_STMEMBER:
+                _, mtype = struct.unpack_from("<HI", body, p)
+                name = _cstr(body, p + 6)
+                out.statics.append((name, self.name(mtype)))
+                p += 6 + len(name.encode()) + 1
+            elif leaf == LF_ONEMETHOD:
+                attr, mtype = struct.unpack_from("<HI", body, p)
+                p += 6
+                vbase = None
+                if attr >> 2 & 7 in INTRO_VIRTUAL:
+                    vbase = struct.unpack_from("<I", body, p)[0]
+                    p += 4
+                name = _cstr(body, p)
+                out.methods.append((name, mtype, vbase))
+                p += len(name.encode()) + 1
+            elif leaf == LF_METHOD:
+                count, mlist = struct.unpack_from("<HI", body, p)
+                name = _cstr(body, p + 6)
+                out.methods += [(name, mtype, vbase) for mtype, vbase in self._method_list(mlist, count)]
+                p += 6 + len(name.encode()) + 1
+            elif leaf in (LF_NESTTYPE, LF_VFUNCTAB, LF_INDEX):
+                ti2 = struct.unpack_from("<I", body, p + 2)[0]
+                p += 6
+                if leaf == LF_NESTTYPE:
+                    p += len(_cstr(body, p).encode()) + 1
+                elif leaf == LF_INDEX:
+                    self._fields(ti2, out)
+            elif leaf == LF_ENUMERATE:
+                value, p = _numeric(body, p + 2)
+                name = _cstr(body, p)
+                out.enumerators.append((name, value))
+                p += len(name.encode()) + 1
+            else:
+                break  # an entry this reader does not know: stop rather than misread the rest
+            off = p
+
+    def _method_list(self, ti, count):
+        kind, body = self.record(ti)
+        out, p = [], 0
+        while kind == LF_METHODLIST and p + 8 <= len(body) and len(out) < count:
+            attr, _, mtype = struct.unpack_from("<HHI", body, p)
+            p += 8
+            vbase = None
+            if attr >> 2 & 7 in INTRO_VIRTUAL:
+                vbase = struct.unpack_from("<I", body, p)[0]
+                p += 4
+            out.append((mtype, vbase))
+        return out
+
+    def vtable(self, name, depth=0):
+        """{vtable offset: "Class::method(args)"} for the primary vtable, bases first, from introducing virtuals."""
+        u = self.udt(name)
+        if u is None or depth > 16:
+            return {}
+        out = {}
+        for base, offset in u.bases:
+            if offset == 0:
+                out.update(self.vtable(base, depth + 1))
+        for mname, mtype, vbase in u.methods:
+            if vbase is not None:
+                out[vbase] = self.signature(mtype, f"{name}::{mname}")
+        return out
+
+    def describe(self, name):
+        u = self.udt(name)
+        if u is None:
+            return f"{name}: not in this PDB's types\n"
+        lines = [f"{u.kind} {u.name}  (size {u.size:#x})"]
+        lines += [f"  base {b}" + (f" at +{o:#x}" if o is not None else " (virtual)") for b, o in u.bases]
+        lines += [f"  +{o:#06x}  {t} {n}" for o, n, t in sorted(u.members)]
+        lines += [f"  static {t} {n}" for n, t in u.statics]
+        lines += [f"  {n} = {v}" for n, v in u.enumerators]
+        lines += [f"  vtable +{o:#05x}  {m}" for o, m in sorted(self.vtable(name).items())]
+        lines += [f"  method {self.signature(t, n)}" for n, t, _ in u.methods]
+        return "\n".join(lines) + "\n"
