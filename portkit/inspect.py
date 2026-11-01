@@ -6,9 +6,10 @@ promises: the Porting Kit run is what settles them.
 
 import mmap
 import re
+import struct
 from pathlib import Path
 
-from . import games, pe
+from . import games, pdb, pe
 
 # File (or folder) name patterns -> component. Matched against names in the game folder.
 COMPONENTS = [
@@ -49,6 +50,10 @@ GRAPHICS_DLLS = {
 # have .text_hf and .no_bbt. All have ordinary entropy.
 STANDARD_CODE_SECTIONS = {".text", ".textbss", "text", "code", ".init", "init", "page", ".itext",
                           ".uedbg", ".text_hf", ".no_bbt"}
+UNREAL_RHI = {"D3D12RHI": "DirectX 12", "D3D11RHI": "DirectX 11", "VulkanRHI": "Vulkan",
+              "OpenGLDrv": "OpenGL", "MetalRHI": "Metal"}
+UNREAL_GROUPS = ("engine modules", "engine plugins", "project modules", "project plugins", "third-party",
+                 "tools and redistributables")
 PACKED_ENTROPY = 7.2  # machine code sits around 6 to 6.9; encrypted or compressed code near 8
 PE_SUFFIXES = {".exe", ".dll"}
 
@@ -153,7 +158,7 @@ def inspect_folder(root, max_pe=600):
 
     main = games.guess_exe(root)
     pe_files = sorted((p for p in files if p.suffix.lower() in PE_SUFFIXES), key=lambda p: -p.stat().st_size)
-    graphics, x86_32, parsed, code = {}, [], 0, 0
+    graphics, x86_32, parsed, code, binaries = {}, [], 0, 0, []
     # In a modular build the main executable is a small stub: protection is judged on every code file.
     protection = {"files": 0, "max_entropy": 0.0, "max_entropy_file": None, "flagged": [], "steamstub": []}
     for p in pe_files[:max_pe]:
@@ -163,6 +168,7 @@ def inspect_folder(root, max_pe=600):
             continue
         parsed += 1
         code += b.code_size
+        binaries.append((p, b))
         rel = p.relative_to(root).as_posix()
         if entropies := [s.entropy for s in b.sections if s.executable and s.entropy is not None]:
             protection["files"] += 1
@@ -202,8 +208,64 @@ def inspect_folder(root, max_pe=600):
                 report["main"].update(unreal_version=ue["version"], unreal_branch=ue["branch"],
                                       unreal_changelist=ue["changelist"])
                 break
+    if engine == "Unreal Engine" and main:
+        report["unreal"] = unreal_build(root, main, binaries)
+        for api, module in report["unreal"]["rhi"].items():
+            if api not in report["graphics"]:
+                report["graphics"].append(api)
+                report["graphics_importers"][api] = [module]
     report["routes"] = routes(report)
     return report
+
+
+def unreal_build(root, main, binaries):
+    """What a modular Unreal build is made of: modules by origin, shipped PDBs, RHI modules, modding files.
+
+    Modules of the game's target are named <Target>-<Module>-Win64-Shipping.dll; they are the engine's when
+    they sit under Engine/, the project's when under the project's folder (FactoryGame/ for Satisfactory).
+    """
+    target = _unreal_target(main) or ""
+    projects = sorted(d.name for d in root.iterdir() if d.is_dir() and d.name != "Engine"
+                      and any((d / sub).is_dir() for sub in ("Binaries", "Content", "Plugins")))
+    groups = {g: {"files": 0, "code_mb": 0.0, "pdbs": 0} for g in UNREAL_GROUPS}
+    plugins, rhi, pdbs = {}, {}, {"files": 0, "matching": 0, "gb": 0.0}
+    for p, b in binaries:
+        parts = p.relative_to(root).parts
+        module = p.name.lower().startswith(target.lower() + "-") and "ThirdParty" not in parts
+        if "Redist" in parts or "Programs" in parts or (p.suffix.lower() == ".exe" and p != main):
+            group = "tools and redistributables"
+        elif module and parts[0] == "Engine":
+            group = "engine plugins" if parts[1] == "Plugins" else "engine modules"
+        elif module and parts[0] in projects:
+            group = "project plugins" if parts[1] == "Plugins" else "project modules"
+        else:
+            group = "third-party"
+        g = groups[group]
+        g["files"] += 1
+        g["code_mb"] += b.code_size / 2**20
+        if group == "project plugins":
+            plugin = plugins.setdefault(parts[2], {"files": 0, "code_mb": 0.0})
+            plugin["files"] += 1
+            plugin["code_mb"] += b.code_size / 2**20
+        if hit := re.match(rf"{re.escape(target)}-(\w+)-Win64-", p.name):
+            if api := UNREAL_RHI.get(hit.group(1)):
+                rhi.setdefault(api, p.relative_to(root).as_posix())
+        if (sym := p.with_suffix(".pdb")).is_file():
+            g["pdbs"] += 1
+            pdbs["files"] += 1
+            pdbs["gb"] += sym.stat().st_size / 1e9
+            try:
+                pdbs["matching"] += pdb.signature(sym) == (b.pdb_guid, b.pdb_age)
+            except (pdb.NotPDB, OSError, struct.error):
+                pass
+    for d in (*groups.values(), *plugins.values()):
+        d["code_mb"] = round(d["code_mb"], 2)
+    pdbs["gb"] = round(pdbs["gb"], 1)
+    modding = sorted(p.relative_to(root).as_posix() for p in root.rglob("*")
+                     if p.is_file() and (p.name.lower() == "headers.zip" or p.suffix.lower() == ".usmap"))
+    return {"target": target, "projects": projects, "groups": groups,
+            "project_plugins": dict(sorted(plugins.items(), key=lambda kv: -kv[1]["code_mb"])),
+            "pdbs": pdbs, "rhi": rhi, "modding": modding}
 
 
 def routes(r):
@@ -249,6 +311,17 @@ def routes(r):
         if main.get("unreal_branch") and not main["unreal_branch"].startswith("++UE"):
             recomp.append(("risk", f"the engine is the studio's own branch ({main['unreal_branch']}), not Epic's "
                                    "release: a native engine has to be built from that branch"))
+    if u := r.get("unreal"):
+        g = u["groups"]
+        own = g["project modules"]["code_mb"] + g["project plugins"]["code_mb"]
+        loaded = sum(v["code_mb"] for k, v in g.items() if k != "tools and redistributables")
+        recomp.append(("info", f"modular build: the project's own modules and plugins hold {own:.1f} MB of the "
+                               f"{loaded:.1f} MB of code the game can load; the rest is the engine and third parties"))
+        if u["pdbs"]["matching"]:
+            recomp.append(("ok", f"{u['pdbs']['matching']} PDBs ship and match their binaries ({u['pdbs']['gb']} GB): "
+                                 "function boundaries, names and types for code discovery"))
+        if u["modding"]:
+            recomp.append(("ok", f"modding resources ship: {', '.join(u['modding'])}"))
     if r["graphics"]:
         recomp.append(("work", f"graphics: {', '.join(r['graphics'])} calls and shaders must map to Metal"))
     if comps & ANTI_CHEAT:
@@ -293,6 +366,17 @@ def format_report(r):
                             f" (highest code-section entropy {cp['max_entropy']})"))
         if r["x86_32_binaries"]:
             lines.append(f"32-bit x86  {', '.join(r['x86_32_binaries'])}")
+    if u := r.get("unreal"):
+        lines += ["", f"Unreal build  target {u['target'] or '?'}, project {', '.join(u['projects']) or '?'}; "
+                      f"RHI modules: {', '.join(u['rhi']) or 'none'}"]
+        for name, g in u["groups"].items():
+            lines.append(f"  {name:<28} {g['files']:>4} files {g['code_mb']:>8.1f} MB code {g['pdbs']:>5} PDBs")
+        if u["project_plugins"]:
+            lines.append("  project plugins: " + ", ".join(f"{k} ({v['code_mb']:.2f} MB)"
+                                                           for k, v in u["project_plugins"].items()))
+        lines.append(f"  PDBs         {u['pdbs']['files']} shipped ({u['pdbs']['gb']} GB), "
+                     f"{u['pdbs']['matching']} match their binary")
+        lines.append(f"  Modding      {', '.join(u['modding']) or 'nothing recognised'}")
     m = r.get("main")
     if m:
         lines += [

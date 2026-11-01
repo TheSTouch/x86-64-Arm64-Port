@@ -1,7 +1,7 @@
 """A small read-only parser for Windows PE files (.exe, .dll).
 
 Reads what the inspector needs: headers, sections, imports, delay imports,
-exports, TLS callbacks and the CodeView (PDB) path. Nothing is executed.
+exports, TLS callbacks and the CodeView (PDB) path, GUID and age. Nothing is executed.
 """
 
 import math
@@ -55,6 +55,8 @@ class PE:
     export_dll: str = ""
     tls_callbacks: int = 0
     pdb: str | None = None
+    pdb_guid: bytes | None = None
+    pdb_age: int | None = None
 
     @property
     def code_size(self):
@@ -240,5 +242,7 @@ def _parse(path, buf, with_entropy):
             if dtype == 2 and buf[dptr:dptr + 4] == b"RSDS":
                 end = buf.find(b"\0", dptr + 24, dptr + dsize)
                 pe.pdb = bytes(buf[dptr + 24:end if end >= 0 else dptr + dsize]).decode("utf-8", "replace")
+                pe.pdb_guid = bytes(buf[dptr + 4:dptr + 20])
+                pe.pdb_age = struct.unpack_from("<I", buf, dptr + 20)[0]
                 break
     return pe

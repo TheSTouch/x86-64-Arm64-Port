@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from portkit import inspect, pe
+from portkit import inspect, pdb, pe
 from tests.test_pe import build_pe
 
 GUID = bytes(range(16))
@@ -109,6 +109,37 @@ class InspectTest(unittest.TestCase):
         image[0x58 + 240:0x58 + 248] = b".uedbg\0\0"
         flags = inspect.inspect_file(self.put("a.dll", bytes(image)))["sections"][0]["flags"]
         self.assertEqual(flags, [])
+
+    # A-3: what a modular Unreal build is made of, and what ships to help.
+    def test_unreal_module_breakdown(self):
+        self.unreal_game()
+        u = inspect.inspect_folder(self.root)["unreal"]
+        self.assertEqual(u["target"], "Game")
+        self.assertEqual(u["projects"], ["Game"])
+        groups = u["groups"]
+        self.assertEqual(groups["engine modules"]["files"], 4)  # main exe, Core, BuildSettings, VulkanRHI
+        self.assertEqual(groups["engine plugins"]["files"], 1)
+        self.assertEqual(groups["project modules"]["files"], 1)
+        self.assertEqual(groups["project plugins"]["files"], 1)
+        self.assertEqual(groups["third-party"]["files"], 1)
+        self.assertEqual(groups["tools and redistributables"]["files"], 1)
+        self.assertEqual(groups["project modules"]["pdbs"], 1)
+        self.assertEqual(u["project_plugins"], {"Rain": {"files": 1, "code_mb": 0.0}})
+        self.assertEqual(u["pdbs"], {"files": 1, "matching": 1, "gb": 0.0})
+        self.assertEqual(u["rhi"], {"Vulkan": "Engine/Binaries/Win64/Game-VulkanRHI-Win64-Shipping.dll"})
+        self.assertIn("Vulkan", inspect.inspect_folder(self.root)["graphics"])
+        self.assertEqual(u["modding"], ["CommunityResources/Headers.zip"])
+        text = inspect.format_report(inspect.inspect_folder(self.root))
+        self.assertIn("project modules", text)
+        self.assertIn("PDBs", text)
+
+    def test_pdb_signature_matches_codeview_record(self):
+        b = pe.parse(self.put("a.dll", with_pdb(build_pe(b"\xc3"), "a.pdb", age=3)))
+        self.assertEqual((b.pdb, b.pdb_guid, b.pdb_age), ("a.pdb", GUID, 3))
+        self.assertEqual(pdb.signature(self.put("a.pdb", build_msf(age=3))), (GUID, 3))
+        self.assertNotEqual(pdb.signature(self.put("b.pdb", build_msf(guid=bytes(16)))), (GUID, 3))
+        with self.assertRaises(pdb.NotPDB):
+            pdb.signature(self.put("c.pdb", b"not a pdb"))
 
 
 if __name__ == "__main__":

@@ -120,7 +120,7 @@ hides it otherwise. A game's `[env]` table and `--env KEY=VALUE` add or override
 | `./port steam check\|inventory <game>` | Checks a game's sign-in and license through our `steam_api64.dll`; runs a game with a logging `steam_api64.dll` and lists what it asks Steam for |
 | `./port wine -- <program>` | Runs a program in the prefix (`winecfg`, `regedit`, an installer) |
 | `./port games [id]` | Shows each game's resolved settings and whether it is ready |
-| `./port inspect <game\|folder\|file>` | Static report: engine, graphics API, middleware, anti-cheat, code protection, and what each route faces. Reads files only |
+| `./port inspect <game\|folder\|file>` | Static report: engine and version, graphics API, middleware, anti-cheat, code protection in every code file, for Unreal builds the modules by origin and the PDBs shipped, and what each route faces. Reads files only |
 | `./port run <game>` | Plays the game under the Porting Kit (`--kettle`: without Windows Steam) |
 | `./port bench <game>` | Benchmarks a scene (`--attach` measures the game already running) |
 | `./port trace <game>` | Watches a run for the recompilation plan |
@@ -180,6 +180,7 @@ instead.
   - `steam.py`: Windows Steam and its libraries.
   - `games.py`: game files and how they are resolved.
   - `pe.py`: a read-only parser for Windows executables.
+  - `pdb.py`: reads a PDB's signature, to check it belongs to its binary.
   - `inspect.py`: the static report.
   - `session.py`, `bench.py`, `trace.py`: running a game, benchmarking it and watching it.
   - `kettle.py`: builds the Kettle bridge and runs games through it.
