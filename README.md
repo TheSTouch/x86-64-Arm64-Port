@@ -153,6 +153,12 @@ instead.
 - `tests/`: `python3 -m unittest discover -s tests -t .`
 - `runtime/`, `prefixes/`, `reports/`: local only, ignored by git.
 
+## License
+
+[PolyForm Noncommercial 1.0.0](LICENSE), as [Mac To iOS Recomp](https://github.com/TheSTouch/Mac-To-iOS-Recomp):
+free to use, change and share for any noncommercial purpose. The runtimes and tools it downloads
+(Wine, Apple's Game Porting Toolkit, MoltenVK, DXMT, Zig, Steam) keep their own licenses.
+
 ## Disclaimer
 
 For games you bought, on your own devices. Decompiling a program to make it run on another platform
