@@ -3,6 +3,8 @@
 A game's recompilation is planned after its Porting Kit phase, from what that phase measured. This
 page lists what goes in, what each source gives, and the decisions the plan has to make.
 
+Plans so far: [Satisfactory](SATISFACTORY-RECOMP.md).
+
 ## Why recompile at all
 
 On a Mac, the Porting Kit is a translation layer: Rosetta 2 translates the game's x86-64
@@ -61,3 +63,8 @@ The plan stops here if any of these hold:
 5. **Engine knowledge**: if the engine has an official Mac or iOS target (Unreal does), the
    engine's own Metal backend and platform layer show what the game expects.
 6. **First milestone**: the smallest part that proves the pipeline end to end.
+
+When the engine's source is available and the build ships its PDBs (Satisfactory), recovering the game's own
+code as C++ and building it against a native engine can replace translating binaries: a translated module
+cannot call a natively compiled engine across the MSVC and Itanium C++ ABIs
+([SATISFACTORY-RECOMP.md](SATISFACTORY-RECOMP.md) explains why).

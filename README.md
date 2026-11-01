@@ -17,7 +17,7 @@ There are two routes, and each game uses the best one it has:
 
 | Game | Porting Kit | Native recompilation |
 |---|---|---|
-| Satisfactory (Steam, Unreal Engine 5.6) | `wine11`, Vulkan on MoltenVK 1.4.2: reaches the main menu; the menu's 3D scene does not render correctly yet, and some runs stop on a GPU timeout. Details: [docs/SATISFACTORY.md](docs/SATISFACTORY.md) | Not planned yet |
+| Satisfactory (Steam, Unreal Engine 5.6) | `wine11`, Vulkan on MoltenVK 1.4.2: reaches the main menu; the menu's 3D scene does not render correctly yet, and some runs stop on a GPU timeout. Details: [docs/SATISFACTORY.md](docs/SATISFACTORY.md) | Go: no protection, no anti-cheat, every PDB shipped. Plan: Coffee Stain's engine built natively, the game's own code recovered as C++; first milestone, the early loading screen ([docs/SATISFACTORY-RECOMP.md](docs/SATISFACTORY-RECOMP.md)) |
 | STAR WARS: Galactic Racer (Steam, 2026) | Waiting for a Steam copy of the game | To plan after the benchmark ([docs/RECOMP.md](docs/RECOMP.md)) |
 
 Each game has a file in [games/](games/). Fields left empty are filled from the Steam library once
@@ -190,6 +190,7 @@ instead.
 - `layers/imagelog/`: a Vulkan layer and tools for what a game asks of the driver.
 - `docs/RECOMP.md`: how the native recompilation is planned.
 - `docs/SATISFACTORY.md`: Satisfactory on the Porting Kit, what stopped it and what fixed it.
+- `docs/SATISFACTORY-RECOMP.md`: Satisfactory's recompilation plan: go/no-go, what makes it smaller, the decisions, the first milestone.
 - `tests/`: `python3 -m unittest discover -s tests -t .`
 - `runtime/`, `prefixes/`, `reports/`: local only, ignored by git.
 
