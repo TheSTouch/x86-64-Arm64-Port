@@ -1,0 +1,21 @@
+# Satisfactory (Windows, Steam). Unreal Engine 5.6, no anti-cheat, no Mac version.
+# The first game through the Porting Kit.
+
+name = "Satisfactory"
+library = "/Volumes/SMART/SteamLibraryWindows"
+steam_appid = 526870
+install_dir = "Satisfactory"
+exe = ""            # resolved: Engine/Binaries/Win64/FactoryGameSteam-Win64-Shipping.exe
+process = ""
+launch = "steam"
+# Unreal's Vulkan renderer on MoltenVK: works on stock Wine 11 (falls back
+# from SM6 to SM5: MoltenVK has no mesh shaders or 64-bit atomics).
+# DirectX 11 needs DXMT, which stock Wine 11 cannot load yet.
+# r.VT.RVT.DirectCompress=0: Unreal writes compressed (BC) runtime-virtual-
+# texture tiles through an uncompressed view, which Metal forbids (MoltenVK:
+# "Metal does not allow uncompressed views of compressed images"). Passed on
+# the command line because the game rewrites Engine.ini at every start.
+args = ["-vulkan", "-dpcvars=r.VT.RVT.DirectCompress=0"]
+runtime = "wine11"
+
+[env]

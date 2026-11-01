@@ -1,0 +1,17 @@
+# STAR WARS: Galactic Racer (Windows, Steam). Released 6 October 2026.
+# Empty fields are filled from the Steam library once the game is there:
+# ./port games star-wars-galactic-racer shows what was found.
+
+name = "STAR WARS: Galactic Racer"
+library = "/Volumes/SMART/SteamLibraryWindows"
+steam_appid = 0     # from its appmanifest
+install_dir = ""    # folder under steamapps/common
+exe = ""            # main executable, relative to install_dir
+process = ""        # the process to watch (Unreal: the *-Win64-Shipping.exe)
+launch = "steam"    # "steam": through Steam's -applaunch; "direct": the exe under Wine
+args = []
+runtime = "gptk"
+
+[env]
+# Minimum CPU is an i5-8400 (AVX2); ROSETTA_ADVERTISE_AVX=1 is on by default.
+# On M3 or later, D3DM_SUPPORT_DXR = "1" lets D3DMetal expose ray tracing.

@@ -1,0 +1,8 @@
+# Heavy, local, or game-derived: never in git.
+/runtime/
+/prefixes/
+/reports/
+*.trace
+__pycache__/
+*.pyc
+.DS_Store

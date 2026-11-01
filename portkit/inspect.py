@@ -1,0 +1,248 @@
+"""Static inspection of a Windows game: what it is built with and what each route faces.
+
+Reads files only; nothing is run. The verdicts are hints for planning, not
+promises: the Porting Kit run is what settles them.
+"""
+
+import mmap
+import re
+from pathlib import Path
+
+from . import games, pe
+
+# File (or folder) name patterns -> component. Matched against names in the game folder.
+COMPONENTS = [
+    (r"^steam_api64\.dll$|^steam_api\.dll$", "Steamworks"),
+    (r"^eossdk-win64-shipping\.dll$", "Epic Online Services"),
+    (r"easyanticheat", "Easy Anti-Cheat"),
+    (r"^battleye$|^beservice|_be\.exe$", "BattlEye"),
+    (r"^d3d12core\.dll$", "DirectX 12 Agility SDK"),
+    (r"^dstorage(core)?\.dll$", "DirectStorage"),
+    (r"^nvngx_dlss\.dll$", "NVIDIA DLSS"),
+    (r"^nvngx_dlssg\.dll$", "NVIDIA DLSS Frame Generation"),
+    (r"^sl\.interposer\.dll$", "NVIDIA Streamline"),
+    (r"^gfsdk_aftermath", "NVIDIA Aftermath"),
+    (r"amd_fidelityfx|^ffx_", "AMD FidelityFX (FSR)"),
+    (r"^amd_ags_x64\.dll$", "AMD AGS"),
+    (r"^libxess\.dll$", "Intel XeSS"),
+    (r"^bink2w64\.dll$", "Bink video"),
+    (r"^fmod(studio)?\.dll$", "FMOD"),
+    (r"aksoundengine|wwise", "Wwise"),
+    (r"^oo2core_\d+_win64\.dll$", "Oodle"),
+    (r"physx", "PhysX"),
+    (r"^unityplayer\.dll$", "Unity player"),
+    (r"^gameassembly\.dll$", "Unity IL2CPP"),
+]
+COMPONENTS = [(re.compile(p, re.I), name) for p, name in COMPONENTS]
+
+ANTI_CHEAT = {"Easy Anti-Cheat", "BattlEye"}
+
+GRAPHICS_DLLS = {
+    "d3d12.dll": "DirectX 12",
+    "d3d11.dll": "DirectX 11",
+    "d3d9.dll": "DirectX 9",
+    "vulkan-1.dll": "Vulkan",
+    "opengl32.dll": "OpenGL",
+}
+
+STANDARD_CODE_SECTIONS = {".text", ".textbss", "text", "code", ".init", "init", "page", ".itext"}
+UE_VERSION = re.compile(rb"\+\+UE([45])\+Release-([0-9]+\.[0-9]+)")
+PE_SUFFIXES = {".exe", ".dll"}
+
+
+def _scan(path, regex, limit=512 * 1024 * 1024):
+    with open(path, "rb") as f:
+        try:
+            with mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as m:
+                if hit := regex.search(m, 0, min(len(m), limit)):
+                    return hit
+        except ValueError:
+            return None
+    return None
+
+
+def _section_report(binary):
+    out = []
+    for s in binary.sections:
+        if not s.executable:
+            continue
+        flags = []
+        if s.entropy is not None and s.entropy > 7.2:
+            flags.append("encrypted or packed at rest")
+        if s.name.lower() not in STANDARD_CODE_SECTIONS:
+            flags.append("non-standard code section")
+        out.append({"name": s.name, "size_mb": round(s.vsize / 2**20, 1), "entropy": s.entropy, "flags": flags})
+    return out
+
+
+def inspect_file(path):
+    binary = pe.parse(path, with_entropy=True)
+    names = [s.name for s in binary.sections]
+    sections = _section_report(binary)
+    protection = []
+    if ".bind" in names:
+        protection.append("SteamStub DRM wrapper (.bind section)")
+    if any("encrypted or packed at rest" in s["flags"] for s in sections):
+        protection.append("code encrypted or packed at rest: a protector decrypts it at run time "
+                          "(Denuvo, Arxan, VMProtect, Themida...)")
+    if len(names) != len(set(names)):
+        protection.append("duplicate section names: typical of a protector")
+    ue = _scan(path, UE_VERSION)
+    return {
+        "path": str(path),
+        "size_mb": round(binary.size / 2**20, 1),
+        "machine": binary.machine,
+        "subsystem": binary.subsystem,
+        "dll": binary.is_dll,
+        "code_mb": round(binary.code_size / 2**20, 1),
+        "sections": sections,
+        "tls_callbacks": binary.tls_callbacks,
+        "pdb": binary.pdb,
+        "imports": {dll: len(fns) for dll, fns in binary.imports.items()},
+        "delay_imports": {dll: len(fns) for dll, fns in binary.delay_imports.items()},
+        "exports": binary.exports,
+        "unreal_version": f"{ue.group(1).decode()}.{ue.group(2).decode().split('.', 1)[1]}" if ue else None,
+        "protection": protection,
+    }
+
+
+def inspect_folder(root, max_pe=600):
+    root = Path(root)
+    files = [p for p in root.rglob("*") if p.is_file()]
+    total = sum(p.stat().st_size for p in files)
+    names = {p.name for p in files} | {p.name for p in root.rglob("*") if p.is_dir()}
+    components = sorted({label for rx, label in COMPONENTS for n in names if rx.search(n)})
+
+    exts = {}
+    for p in files:
+        exts[p.suffix.lower()] = exts.get(p.suffix.lower(), 0) + 1
+
+    engine = None
+    if exts.get(".pak") or exts.get(".utoc") or any(p.name.lower().endswith("-shipping.exe") for p in files):
+        engine = "Unreal Engine"
+    elif "Unity player" in components:
+        engine = "Unity (IL2CPP)" if "Unity IL2CPP" in components else "Unity (Mono)"
+
+    main = games.guess_exe(root)
+    pe_files = sorted((p for p in files if p.suffix.lower() in PE_SUFFIXES), key=lambda p: -p.stat().st_size)
+    graphics, x86_32, parsed, code = {}, [], 0, 0
+    for p in pe_files[:max_pe]:
+        try:
+            b = pe.parse(p)
+        except (pe.NotPE, OSError, ValueError):
+            continue
+        parsed += 1
+        code += b.code_size
+        if b.machine == "x86":
+            x86_32.append(p.name)
+        for dll in b.imported_dlls():
+            if dll in GRAPHICS_DLLS:
+                graphics.setdefault(GRAPHICS_DLLS[dll], []).append(str(p.relative_to(root)))
+
+    report = {
+        "root": str(root),
+        "size_gb": round(total / 1e9, 1),
+        "files": len(files),
+        "top_extensions": dict(sorted(exts.items(), key=lambda kv: -kv[1])[:12]),
+        "engine": engine,
+        "components": components,
+        "graphics": sorted(graphics, key=lambda api: -len(graphics[api])),
+        "graphics_importers": graphics,
+        "pe_files": len(pe_files),
+        "pe_parsed": parsed,
+        "code_mb": round(code / 2**20, 1),
+        "x86_32_binaries": x86_32[:20],
+        "main": inspect_file(main) if main else None,
+    }
+    if engine == "Unreal Engine" and report["main"] and not report["main"]["unreal_version"]:
+        # Modular builds keep the version string in the Core module.
+        for p in pe_files:
+            if re.search(r"-core-win64-shipping\.dll$", p.name, re.I) and (ue := _scan(p, UE_VERSION)):
+                report["main"]["unreal_version"] = f"{ue.group(1).decode()}.{ue.group(2).decode().split('.', 1)[1]}"
+                break
+    report["routes"] = routes(report)
+    return report
+
+
+def routes(r):
+    main = r.get("main") or {}
+    comps = set(r["components"])
+    gptk, recomp = [], []
+
+    if blockers := comps & ANTI_CHEAT:
+        gptk.append(("blocker", f"{', '.join(sorted(blockers))}: kernel anti-cheat does not run under "
+                                 "Wine on macOS; single-player may still work if the game allows starting without it"))
+    if "DirectX 12" in r["graphics"] or "DirectX 11" in r["graphics"]:
+        gptk.append(("ok", "DirectX 11/12: translated to Metal by D3DMetal"))
+    if "Vulkan" in r["graphics"] and not ({"DirectX 12", "DirectX 11"} & set(r["graphics"])):
+        gptk.append(("risk", "Vulkan only: D3DMetal translates DirectX, not Vulkan"))
+    if comps & {"NVIDIA DLSS", "NVIDIA DLSS Frame Generation"}:
+        gptk.append(("info", "DLSS needs an NVIDIA GPU: pick FSR/XeSS or native resolution in the game"))
+    if "DirectStorage" in comps:
+        gptk.append(("risk", "DirectStorage: Wine's support is partial; loading may be slow or fail"))
+    if main:
+        gptk.append(("info", "x86-64 code runs through Rosetta 2 (AVX advertised by default)"))
+
+    if main.get("protection"):
+        recomp.append(("blocker", "the main executable looks protected (see the hints above): static "
+                                  "recompilation needs the decrypted code, and removing the protection "
+                                  "is not something this project does"))
+    elif main:
+        total = r.get("code_mb", main["code_mb"])
+        recomp.append(("ok", f"main executable code is plain; {total} MB of x86 code across all "
+                             ".exe/.dll files (third-party DLLs included)"))
+    if r["engine"] == "Unreal Engine":
+        recomp.append(("info", f"Unreal Engine {main.get('unreal_version') or '(version unknown)'}: the engine "
+                               "has a Mac target, so engine-level knowledge transfers"))
+    if r["graphics"]:
+        recomp.append(("work", f"graphics: {', '.join(r['graphics'])} calls and shaders must map to Metal"))
+    if comps & ANTI_CHEAT:
+        recomp.append(("risk", "anti-cheat: online modes stay out of reach"))
+    return {"porting_kit": gptk, "recomp": recomp}
+
+
+def inspect_path(path):
+    path = Path(path)
+    return inspect_folder(path) if path.is_dir() else {"main": inspect_file(path)}
+
+
+def format_report(r):
+    lines = []
+    if "root" in r:
+        lines += [
+            f"Folder      {r['root']}",
+            f"Size        {r['size_gb']} GB in {r['files']} files ({r['pe_files']} .exe/.dll)",
+            f"Engine      {r['engine'] or 'not recognised'}",
+            "Graphics    " + (", ".join(f"{api} ({len(r['graphics_importers'][api])} files)" for api in r["graphics"])
+                             or "none found in imports"),
+            f"Code        {r['code_mb']} MB of machine code in {r['pe_parsed']} parsed .exe/.dll",
+            f"Components  {', '.join(r['components']) or 'none recognised'}",
+        ]
+        if r["x86_32_binaries"]:
+            lines.append(f"32-bit x86  {', '.join(r['x86_32_binaries'])}")
+    m = r.get("main")
+    if m:
+        lines += [
+            "",
+            f"Main executable  {m['path']}",
+            f"  {m['machine']} {m['subsystem']}, {m['size_mb']} MB file, {m['code_mb']} MB code"
+            + (f", Unreal {m['unreal_version']}" if m["unreal_version"] else ""),
+            f"  PDB path   {m['pdb'] or 'none'}",
+            f"  TLS callbacks {m['tls_callbacks']}, exports {m['exports']}",
+            "  Code sections:",
+        ]
+        for s in m["sections"]:
+            lines.append(f"    {s['name']:<10} {s['size_mb']:>7} MB  entropy {s['entropy']}"
+                         + (f"  ({'; '.join(s['flags'])})" if s["flags"] else ""))
+        imports = sorted(m["imports"].items(), key=lambda kv: kv[0].lower())
+        lines.append(f"  Imports from {len(imports)} DLLs ({sum(n for _, n in imports)} functions), "
+                     f"{len(m['delay_imports'])} delay-loaded")
+        lines.append("    " + ", ".join(f"{d} ({n})" for d, n in imports))
+        if m["protection"]:
+            lines.append("  Protection hints:")
+            lines += [f"    - {p}" for p in m["protection"]]
+    for route, title in (("porting_kit", "Porting Kit route"), ("recomp", "Native recompilation route")):
+        if r.get("routes", {}).get(route):
+            lines += ["", title]
+            lines += [f"  [{level}] {text}" for level, text in r["routes"][route]]
+    return "\n".join(lines)
