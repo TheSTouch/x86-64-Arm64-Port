@@ -6,7 +6,7 @@ import subprocess
 import sys
 from datetime import datetime
 
-from . import bench, config, games, inspect, kettle, runtime, session, steam, trace, wine
+from . import bench, config, decomp, games, inspect, kettle, runtime, session, steam, trace, wine
 from .util import Fail, free_gb, step, sysctl
 
 
@@ -172,6 +172,23 @@ def cmd_inspect(a):
     return 0
 
 
+def cmd_decomp(a):
+    if a.out:
+        root, fns = decomp.dump(a.dll, a.out, a.source)
+        print(f"{len(fns)} functions ({sum(f.length for f in fns)} bytes) written to {root}")
+        return 0
+    m = decomp.Module(a.dll)
+    if a.disasm:
+        print(m.disassemble(m.function(a.disasm)), end="")
+        return 0
+    fns = m.functions if a.all else m.game_functions(a.source)
+    for f in fns:
+        source = f.source.replace("\\", "/").rsplit("/", 1)[-1] if f.source else "-"
+        print(f"{m.rva(f.segment, f.offset):#010x} {f.length:>6}  {source}:{f.first_line}  {f.name}")
+    print(f"{len(fns)} functions, {sum(f.length for f in fns)} bytes", file=sys.stderr)
+    return 0
+
+
 def cmd_run(a):
     g = _game(a)
     session.ready(g)
@@ -237,6 +254,14 @@ def parser():
     sp.add_argument("target", help="a game id, a folder or a file")
     sp.add_argument("--json", action="store_true")
     sp.set_defaults(fn=cmd_inspect)
+
+    sp = sub.add_parser("decomp", help="a module's functions from its PDB, and their disassembly (reads files only)")
+    sp.add_argument("dll", help="a .dll or .exe with its .pdb next to it")
+    sp.add_argument("--source", help="only functions whose source path contains this (default: the game's own)")
+    sp.add_argument("--all", action="store_true", help="list every function, engine templates included")
+    sp.add_argument("--disasm", metavar="NAME", help="disassemble one function (name or decorated name)")
+    sp.add_argument("--out", metavar="DIR", help="write functions.tsv and one .asm per function (outside this repository)")
+    sp.set_defaults(fn=cmd_decomp)
 
     def game_cmd(name, help_):
         sp = sub.add_parser(name, help=help_)

@@ -53,6 +53,7 @@ class PETest(unittest.TestCase):
         self.assertTrue(b.sections[0].executable)
         self.assertEqual(b.sections[0].entropy, 0.0)
         self.assertEqual(b.imports, {"KERNEL32.dll": ["ExitProcess", "#5"]})
+        self.assertEqual(b.iat, {0x2040: "KERNEL32.dll!ExitProcess", 0x2048: "KERNEL32.dll!#5"})
         self.assertEqual(b.code_size, 0x1000)
 
     def test_not_pe(self):

@@ -213,6 +213,10 @@ layers/imagelog/build.sh
 
 ## To do next without the game
 
+- Recovery has started with the tools only: `./port decomp <dll> --out /Volumes/SMART/TheSTouch/satisfactory-recomp/work`
+  lists a module's game functions from its PDB and writes each one's annotated disassembly to the
+  recovered-code repository.
+
 - Diff `5.6.1-CSS` against Epic's 5.6.1 tag (which engine modules Coffee Stain changed), and check that
   its tag matches CL 513885.
 - Build the fork for macOS arm64, and check that VulkanRHI is available there.

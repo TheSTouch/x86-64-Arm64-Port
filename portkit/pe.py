@@ -49,6 +49,7 @@ class PE:
     subsystem: str
     sections: list = field(default_factory=list)
     imports: dict = field(default_factory=dict)
+    iat: dict = field(default_factory=dict)  # import address table: slot RVA -> "DLL!name"
     delay_imports: dict = field(default_factory=dict)
     exports: int = 0
     export_names: list = field(default_factory=list)
@@ -128,14 +129,17 @@ def _thunks(r, rva, wide, limit=100_000):
     return names
 
 
-def _imports(r, rva, wide):
+def _imports(r, rva, wide, iat=None):
     out = {}
     while rva:
         oft, _, _, name_rva, ft = (r.u32(rva + i * 4) for i in range(5))
         if not (oft or name_rva or ft):
             break
         if name := r.cstr(name_rva):
-            out.setdefault(name, []).extend(_thunks(r, oft or ft, wide))
+            fns = _thunks(r, oft or ft, wide)
+            out.setdefault(name, []).extend(fns)
+            if iat is not None and ft:
+                iat.update({ft + i * (8 if wide else 4): f"{name}!{fn}" for i, fn in enumerate(fns)})
         rva += 20
         if len(out) > 4096:
             break
@@ -217,7 +221,7 @@ def _parse(path, buf, with_entropy):
     )
     r = _Reader(buf, sections)
     if dirs[DIR_IMPORT][0]:
-        pe.imports = _imports(r, dirs[DIR_IMPORT][0], wide)
+        pe.imports = _imports(r, dirs[DIR_IMPORT][0], wide, pe.iat)
     if dirs[DIR_DELAY_IMPORT][0]:
         pe.delay_imports = _delay_imports(r, dirs[DIR_DELAY_IMPORT][0], wide)
     if dirs[DIR_EXPORT][0]:
