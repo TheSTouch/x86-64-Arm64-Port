@@ -46,19 +46,41 @@ GRAPHICS_DLLS = {
 }
 
 STANDARD_CODE_SECTIONS = {".text", ".textbss", "text", "code", ".init", "init", "page", ".itext"}
-UE_VERSION = re.compile(rb"\+\+UE([45])\+Release-([0-9]+\.[0-9]+)")
 PE_SUFFIXES = {".exe", ".dll"}
 
+# Unreal's build version: "5.6.1-44394996+++UE5+Release-5.6" in stock builds, "5.6.1-++Studio+branch-CL-123"
+# on a studio's own engine branch, or only the branch ("++UE4+Release-4.27"). Shipping builds keep it as
+# UTF-16 (TEXT()) in the BuildSettings module, older monolithic ones as ASCII in the executable.
+UE_VERSION = re.compile(r"(?:(\d+\.\d+\.\d+)-(?:(\d+)\+)?)?(\+\+\w+\+[\w.+-]+)")
 
-def _scan(path, regex, limit=512 * 1024 * 1024):
+
+def unreal_version(path, limit=512 * 1024 * 1024, max_hits=20000):
+    """{"version", "branch", "changelist"} from an Unreal binary's build string, or None."""
     with open(path, "rb") as f:
         try:
-            with mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as m:
-                if hit := regex.search(m, 0, min(len(m), limit)):
-                    return hit
+            m = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
         except ValueError:
             return None
+    with m:
+        end = min(len(m), limit)
+        for encoding, needle in (("utf-16-le", "++".encode("utf-16-le")), ("latin-1", b"++")):
+            i, hits = m.find(needle, 0, end), 0
+            while i >= 0 and hits < max_hits:
+                hits += 1
+                start = max(i - 64, i % 2) if encoding == "utf-16-le" else max(i - 32, 0)
+                text = m[start:min(i + 256, end)].decode(encoding, "replace")
+                if hit := UE_VERSION.search(text):
+                    return _version_fields(*hit.groups())
+                i = m.find(needle, i + 2, end)
     return None
+
+
+def _version_fields(version, changelist, branch):
+    if cl := re.search(r"-CL-(\d+)$", branch):
+        branch, changelist = branch[:cl.start()], changelist or cl.group(1)
+    if not version and (release := re.search(r"Release-(\d+\.\d+)", branch)):
+        version = release.group(1)
+    return {"version": version, "branch": branch, "changelist": changelist}
 
 
 def _section_report(binary):
@@ -87,7 +109,7 @@ def inspect_file(path):
                           "(Denuvo, Arxan, VMProtect, Themida...)")
     if len(names) != len(set(names)):
         protection.append("duplicate section names: typical of a protector")
-    ue = _scan(path, UE_VERSION)
+    ue = unreal_version(path) or {}
     return {
         "path": str(path),
         "size_mb": round(binary.size / 2**20, 1),
@@ -101,7 +123,9 @@ def inspect_file(path):
         "imports": {dll: len(fns) for dll, fns in binary.imports.items()},
         "delay_imports": {dll: len(fns) for dll, fns in binary.delay_imports.items()},
         "exports": binary.exports,
-        "unreal_version": f"{ue.group(1).decode()}.{ue.group(2).decode().split('.', 1)[1]}" if ue else None,
+        "unreal_version": ue.get("version"),
+        "unreal_branch": ue.get("branch"),
+        "unreal_changelist": ue.get("changelist"),
         "protection": protection,
     }
 
@@ -155,10 +179,12 @@ def inspect_folder(root, max_pe=600):
         "main": inspect_file(main) if main else None,
     }
     if engine == "Unreal Engine" and report["main"] and not report["main"]["unreal_version"]:
-        # Modular builds keep the version string in the Core module.
-        for p in pe_files:
-            if re.search(r"-core-win64-shipping\.dll$", p.name, re.I) and (ue := _scan(p, UE_VERSION)):
-                report["main"]["unreal_version"] = f"{ue.group(1).decode()}.{ue.group(2).decode().split('.', 1)[1]}"
+        # Modular builds keep the version string in the BuildSettings module (older ones in Core).
+        for module in ("buildsettings", "core"):
+            found = [p for p in pe_files if re.search(rf"-{module}-win64-shipping\.dll$", p.name, re.I)]
+            if found and (ue := unreal_version(found[0])):
+                report["main"].update(unreal_version=ue["version"], unreal_branch=ue["branch"],
+                                      unreal_changelist=ue["changelist"])
                 break
     report["routes"] = routes(report)
     return report
@@ -192,13 +218,23 @@ def routes(r):
         recomp.append(("ok", f"main executable code is plain; {total} MB of x86 code across all "
                              ".exe/.dll files (third-party DLLs included)"))
     if r["engine"] == "Unreal Engine":
-        recomp.append(("info", f"Unreal Engine {main.get('unreal_version') or '(version unknown)'}: the engine "
+        recomp.append(("info", f"Unreal Engine {_unreal_label(main) or '(version unknown)'}: the engine "
                                "has a Mac target, so engine-level knowledge transfers"))
+        if main.get("unreal_branch") and not main["unreal_branch"].startswith("++UE"):
+            recomp.append(("risk", f"the engine is the studio's own branch ({main['unreal_branch']}), not Epic's "
+                                   "release: a native engine has to be built from that branch"))
     if r["graphics"]:
         recomp.append(("work", f"graphics: {', '.join(r['graphics'])} calls and shaders must map to Metal"))
     if comps & ANTI_CHEAT:
         recomp.append(("risk", "anti-cheat: online modes stay out of reach"))
     return {"porting_kit": gptk, "recomp": recomp}
+
+
+def _unreal_label(m):
+    if not m.get("unreal_version"):
+        return None
+    extra = ", ".join(x for x in (m.get("unreal_branch"), m.get("unreal_changelist") and f"CL {m['unreal_changelist']}") if x)
+    return f"{m['unreal_version']} ({extra})" if extra else m["unreal_version"]
 
 
 def inspect_path(path):
@@ -226,7 +262,7 @@ def format_report(r):
             "",
             f"Main executable  {m['path']}",
             f"  {m['machine']} {m['subsystem']}, {m['size_mb']} MB file, {m['code_mb']} MB code"
-            + (f", Unreal {m['unreal_version']}" if m["unreal_version"] else ""),
+            + (f", Unreal {_unreal_label(m)}" if m["unreal_version"] else ""),
             f"  PDB path   {m['pdb'] or 'none'}",
             f"  TLS callbacks {m['tls_callbacks']}, exports {m['exports']}",
             "  Code sections:",
