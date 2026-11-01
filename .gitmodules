@@ -1,0 +1,3 @@
+[submodule "vendor/kettle"]
+	path = vendor/kettle
+	url = https://github.com/TheSTouch/kettle
