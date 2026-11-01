@@ -2,6 +2,8 @@
 /runtime/
 /prefixes/
 /reports/
+# Recovered game code lives outside the repository (docs/SATISFACTORY-RECOMP.md).
+satisfactory-recomp/
 *.trace
 __pycache__/
 *.pyc

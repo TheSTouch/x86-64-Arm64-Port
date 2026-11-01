@@ -6,8 +6,9 @@ CL 513885 (`./port inspect satisfactory`, 2026-11-01), on the game's PDBs and on
 [SATISFACTORY.md](SATISFACTORY.md). Steps that need the game running come at the end, under "To run
 later".
 
-Nothing taken from the game is in this repository. The reports, PDB measurements and anything recovered
-from the game stay on the local disk (`reports/` is ignored by git) or in a private location.
+Nothing taken from the game is in this repository. The reports and PDB measurements stay in `reports/`
+(ignored by git); recovered code stays on the owner's own disks (see "Where recovered code lives").
+
 
 ## Verdict: go
 
@@ -172,9 +173,23 @@ Before starting, the owner has to act:
 
 - **Engine access.** Link the owner's GitHub account to Epic and follow the modding docs' steps to the
   `5.6.1-CSS` repository. The engine source stays outside this repository.
-- **Where recovered source lives.** It is derived from the game, so it goes in a private repository or
-  only on the local disk, never in this public repository. The tools (PDB reading, the matching harness)
-  can live here.
+- **Recovered code lives on the owner's disks only** (decided 2026-11-01): see below.
+
+## Where recovered code lives
+
+Recovered C++ is Coffee Stain's code in another form. The decompilation exception for interoperability is
+narrow and forbids passing the result to third parties, so it never leaves the owner's own disks: no
+GitHub, private or public, and no cloud storage.
+
+- **Working copy**: a git repository with no remote, `/Volumes/SMART/TheSTouch/satisfactory-recomp/`.
+- **Backup**: a bare repository on the Mac's internal disk, `~/Backups/satisfactory-recomp.git`, pushed to
+  after each session (`git push backup`). It holds only text: recovered sources, notes, work lists.
+- **Engine source and builds** (Coffee Stain's fork, tens of GB) stay on SMART only, outside this
+  repository and the recovered-code repository.
+- **When the work ends**, both copies are archived to another drive, and the internal-disk copy is deleted.
+
+This repository holds the tools (PDB reading, disassembly, the matching harness) and never game-derived
+output; `.gitignore` also refuses a `satisfactory-recomp/` folder copied in by mistake.
 
 ## To run later (the game running)
 
