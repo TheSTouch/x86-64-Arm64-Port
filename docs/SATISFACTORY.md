@@ -150,3 +150,30 @@ second frame (render thread waiting 120 s, with `DirectCompress` on), once durin
 (MoltenVK: "Lost VkDevice after MTLCommandBuffer … execution failed: Caused GPU Timeout Error";
 Unreal: `TerminateOnGPUCrash`, with `DirectCompress` off). A run that stops this way can simply be
 started again; finding the command buffer needs a capture of a failing run.
+
+## First runs of `bench` and `trace` (A-5)
+
+The benchmark in a world, at the lowest settings, is still to do: it needs a save loaded by hand
+(`./port run satisfactory --hud`, load a save, then
+`./port bench satisfactory --attach --label vulkan-low --note "<scene>"`). Set the lowest
+settings in the game's own options: the game rewrites `GameUserSettings.ini` at start, and most
+of the `sg.*` values set to 0 there were back at 3.
+
+What the first runs, attached to the main menu, showed and changed:
+
+- **Memory**: `ps`'s resident size said 354 MB while Activity Monitor and the Metal HUD said 4.3 GB;
+  under Wine and Rosetta most of the game's memory is compressed or swapped. `bench` now samples
+  the physical footprint (`proc_pid_rusage`), and still records the resident size in `samples.csv`.
+- **Instruments**: saving a 20-second Game Performance recording of the game took 7 minutes
+  (161 MB). `bench` killed `xctrace` after 3, which left a document Instruments cannot open. It now
+  waits up to 15 minutes, stops it with Ctrl-C (which still saves) after that, and lists the trace
+  in the report only when `xctrace` says it saved it.
+- **Ctrl-C** during sampling kept nothing; the report now covers what was sampled.
+- **Menu numbers** (M4, 16 GB, menu scene, with the HUD): about 8 to 9 frames a second with 70 ms
+  of GPU time a frame, 1.2 to 1.5 cores of CPU, a 4.3 GB footprint, and swap growing. The menu's 3D scene
+  is not drawn correctly (A-4), so these are not a benchmark.
+- **`trace`** (menu, `--sample 10`): 83 Wine builtin DLLs and 444 of the game's own in the game's
+  process. Steam's overlay and client DLLs, loaded from Steam's folder, were counted as the game's;
+  they are now listed apart. The most frequent Wine message is Vulkan's
+  `VK_TIME_DOMAIN_QUERY_PERFORMANCE_COUNTER_EXT` (4058 times, Unreal's GPU timing). With `+loaddll`
+  set, Windows Steam took 10 minutes to start, because Steam inherits the trace's debug channels.

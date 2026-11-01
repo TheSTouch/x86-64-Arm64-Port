@@ -29,8 +29,13 @@ RELAY = re.compile(
 ADDRESS = re.compile(r"\b(?:0x)?[0-9a-fA-F]{6,16}\b")
 
 
-def analyse(log_path, game_process=None):
-    """Summarise a Wine log written with WINEDEBUG=+pid,+loaddll."""
+def analyse(log_path, game_process=None, game_root=None):
+    """Summarise a Wine log written with WINEDEBUG=+pid,+loaddll.
+
+    With game_root (the game's folder as Wine sees it), the game's native DLLs
+    from elsewhere, such as Steam's overlay and client, are listed apart.
+    """
+    root = game_root.lower().rstrip("\\") + "\\" if game_root else None
     modules = defaultdict(dict)  # pid -> {dll: kind}
     names = {}  # pid -> first .exe it loaded
     problems = defaultdict(Counter)  # pid -> Counter("fixme:channel:message")
@@ -63,11 +68,13 @@ def analyse(log_path, game_process=None):
     processes = []
     for pid in modules.keys() | problems.keys() | calls.keys():
         mods = modules.get(pid, {})
+        native = sorted(p for p, k in mods.items() if k == "native")
         processes.append({
             "pid": pid,
             "exe": names.get(pid),
             "builtin": sorted(p for p, k in mods.items() if k == "builtin"),
-            "native": sorted(p for p, k in mods.items() if k == "native"),
+            "native": [p for p in native if not root or p.lower().startswith(root)],
+            "other_native": [p for p in native if root and not p.lower().startswith(root)],
             "problems": problems[pid].most_common(60),
             "api_calls": dict(calls[pid].most_common()),
             "call_sites": [f"{a:#x}" for a in sorted(call_sites[pid])],
@@ -93,6 +100,10 @@ def format_summary(game, result):
         lines += ["", ", ".join(PureWindowsPath(x).name for x in p["builtin"]) or "none", ""]
         lines.append(f"**The game's own DLLs: {len(p['native'])}.** These must be recompiled or replaced:")
         lines += ["", ", ".join(PureWindowsPath(x).name for x in p["native"]) or "none", ""]
+        if p.get("other_native"):
+            lines.append(f"**Other native DLLs loaded into it: {len(p['other_native'])}** (from outside the game's "
+                         "folder, such as Steam's overlay and client; not the game's to port):")
+            lines += ["", ", ".join(str(PureWindowsPath(x)) for x in p["other_native"]), ""]
         if p["api_calls"]:
             lines += [f"**Windows API calls seen: {len(p['api_calls'])} functions, "
                       f"{sum(p['api_calls'].values())} calls, from {len(p['call_sites'])} call sites** "
@@ -105,7 +116,8 @@ def format_summary(game, result):
                       "| Count | Message |", "|---|---|"]
             lines += [f"| {n} | `{msg.replace('|', '/')}` |" for msg, n in p["problems"][:30]]
             lines.append("")
-    lines.append(f"D3DMetal log lines: {result['d3dm_lines']} (in `d3dm.log`).")
+    if result["d3dm_lines"]:
+        lines.append(f"D3DMetal log lines: {result['d3dm_lines']} (in `d3dm.log`).")
     return "\n".join(lines) + "\n"
 
 
@@ -145,7 +157,7 @@ def run(game, *, channels="+loaddll", relay=False, dump_metal=False, sample_seco
     except KeyboardInterrupt:
         warn("stopped watching; the game keeps running")
 
-    result, d3dm = analyse(log, game.process)
+    result, d3dm = analyse(log, game.process, wine.windows_path(game.root) if game.root else None)
     (out / "d3dm.log").write_text("\n".join(d3dm) + "\n", encoding="utf-8")
     session.write_json(out / "modules.json", result)
     (out / "summary.md").write_text(format_summary(game, result), encoding="utf-8")
