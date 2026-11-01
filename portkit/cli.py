@@ -4,6 +4,7 @@ import platform
 import shutil
 import subprocess
 import sys
+from datetime import datetime
 
 from . import bench, config, games, inspect, kettle, runtime, session, steam, trace, wine
 from .util import Fail, free_gb, step, sysctl
@@ -83,6 +84,18 @@ def cmd_steam(a):
         if not a.args:
             raise Fail("usage: ./port steam library <path to a Windows Steam library>")
         steam.add_library(a.runtime, a.args[0])
+    elif a.action == "signin":
+        step("Signing in to Steam for the Kettle launch mode (QR code, or account and password if you named one)")
+        code = kettle.signin(a.args[0] if a.args else None)
+        if code:
+            raise Fail(f"not signed in; Kettle's log: {config.REPORTS / 'steam-signin.log'}")
+    elif a.action == "status":
+        info = kettle.token_info(kettle.stored_token())
+        if not info:
+            raise Fail("no Steam sign-in on this Mac for the Kettle launch mode: run ./port steam signin")
+        expires = datetime.fromtimestamp(info["expires"]).strftime("%Y-%m-%d") if info["expires"] else "?"
+        print(f"Signed in to Steam as SteamID {info['steamid']} (Keychain \"{kettle.KEYCHAIN_SERVICE}\", "
+              f"until {expires})")
     elif a.action == "inventory":
         if not a.args:
             raise Fail("usage: ./port steam inventory <game>")
@@ -187,8 +200,9 @@ def parser():
     sp.set_defaults(fn=cmd_setup)
 
     sp = prefixed(sub.add_parser("steam", help="Windows Steam in the prefix"))
-    sp.add_argument("action", choices=["install", "start", "stop", "library", "inventory"])
+    sp.add_argument("action", choices=["install", "start", "stop", "library", "signin", "status", "inventory"])
     sp.add_argument("args", nargs="*", help="library: the library folder; start: extra Steam arguments; "
+                    "signin: an account name (else a QR code), for the Kettle launch mode; "
                     "inventory: a game, run with a logging steam_api64.dll and no Steam")
     sp.set_defaults(fn=cmd_steam)
 

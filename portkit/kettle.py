@@ -193,3 +193,93 @@ def run_inventory(game, out, timeout=900):
     report.write_text(inventory_report(text, f"{game.name}: the Steamworks API it uses") + "\n")
     return report
 
+
+# --- signing in ----------------------------------------------------------------------------------
+
+KETTLE = config.ROOT / "vendor/kettle/Sources/KettleExperimental"
+SIGNIN = BUILD_DIR / "steam-signin"
+# The Keychain item Kettle keeps the Steam client sign-in in on macOS (RecompSteamAuth.m).
+KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT = "Recomp Steam", "steam-client-token"
+
+
+def kettle_sources(*parts):
+    """Kettle's core: the session, protobuf codec and token helpers, plus the files of `parts`."""
+    if not (KETTLE / "KettleFeatures.h").exists():
+        raise Fail("vendor/kettle is empty: run git submodule update --init vendor/kettle")
+    files = {"session": "RecompSteamSession.m", "proto": "RecompSteamProto.c", "util": "RecompSteamUtil.c",
+             "signin": "RecompSteamAuth.m", "cloud": "cloud_protocol.m"}
+    return [KETTLE / files[p] for p in ("session", "proto", "util", "signin", *parts)]
+
+
+def kettle_flags(*features):
+    """Kettle built with only the parts named (KettleFeatures.h), and its headers."""
+    return (["-DKETTLE_EXPERIMENTAL_CONFIGURED=1"] + [f"-DKETTLE_{f}=1" for f in features]
+            + ["-I", KETTLE / "include", "-I", KETTLE])
+
+
+def build_signin():
+    """steam_api/signin/steam-signin.m with Kettle's sign-in, for this Mac (not under Wine)."""
+    source = SOURCE / "signin/steam-signin.m"
+    sources = [source, *kettle_sources()]
+    if not _stale(SIGNIN, sources):
+        return SIGNIN
+    step("Building the Steam sign-in helper (Kettle)")
+    SIGNIN.parent.mkdir(parents=True, exist_ok=True)
+    run(["xcrun", "clang", "-fobjc-arc", "-fmodules", "-O1", "-Wall", "-mmacosx-version-min=12.0",
+         *kettle_flags("SIGN_IN"), "-framework", "Foundation", "-framework", "Security",
+         "-framework", "CoreImage", "-lz", "-o", SIGNIN, *sources])
+    run(["codesign", "-s", "-", "-f", SIGNIN], capture_output=True)
+    return SIGNIN
+
+
+def signin(account=None, log=None):
+    """Sign in interactively (QR code, or account and password); returns the helper's exit code."""
+    import subprocess
+
+    helper = build_signin()
+    log = log or config.REPORTS / "steam-signin.log"
+    log.parent.mkdir(parents=True, exist_ok=True)
+    with open(log, "ab") as err:
+        return subprocess.run([str(helper), *([account] if account else [])], stderr=err).returncode
+
+
+def _jwt_claims(token):
+    import base64
+    import json
+
+    try:
+        payload = token.split(".")[1]
+        return json.loads(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)))
+    except (IndexError, ValueError):
+        return {}
+
+
+def token_info(token):
+    """{steamid, client, expires} of a Steam refresh token (a JWT), or None when it is not one."""
+    claims = _jwt_claims(token or "")
+    if not claims.get("sub"):
+        return None
+    aud = claims.get("aud", [])
+    return {
+        "steamid": int(claims["sub"]) if str(claims["sub"]).isdigit() else 0,
+        "client": "client" in (aud if isinstance(aud, list) else [aud]),
+        "expires": int(claims.get("exp", 0)),
+    }
+
+
+def stored_token(environ=None, security=None):
+    """The sign-in Kettle would log on with, as RecompSteamAuth_StoredToken finds it on macOS:
+    $RECOMP_STEAM_TOKEN, else the Keychain item. Only a Steam client token counts; None otherwise."""
+    import os
+    import subprocess
+
+    environ = os.environ if environ is None else environ
+    token = environ.get("RECOMP_STEAM_TOKEN") or None
+    if not token:
+        security = security or (lambda args: subprocess.run(args, capture_output=True, text=True))
+        r = security(["/usr/bin/security", "find-generic-password", "-s", KEYCHAIN_SERVICE,
+                      "-a", KEYCHAIN_ACCOUNT, "-w"])
+        token = r.stdout.strip() if r.returncode == 0 else None
+    info = token_info(token)
+    return token if info and info["client"] else None
+
