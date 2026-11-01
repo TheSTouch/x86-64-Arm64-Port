@@ -181,6 +181,37 @@ of Coffee Stain's own) checks the overlay itself before any recovered code is in
 | 4 | Native main menu, with the rest of FactoryGame still stubs | The menu's C++ classes recovered |
 | 5 | Native: load a save and walk around | Most of FactoryGame recovered |
 
+### Step 1: where it stands (2026-11-01)
+
+Done: `FactoryPreEarlyLoadingScreen` is written in full (24 functions, 11,333 bytes, each on its PDB
+lines) with the `RECOMP_WATERMARK` switch; `./port overlay` and `./port run --overlay` work on the real
+install (an overlay with the shipped DLL copied in is at `/Volumes/SMART/TheSTouch/satisfactory-overlay`,
+ready for the baseline run); `./port decomp --match` compares objects. Nothing is compiled yet. Missing,
+in order:
+
+1. **Engine access** (the owner). Neither GitHub account (TheSTouch, stan69b) can read
+   `EpicGames/UnrealEngine` or `satisfactorymodding/UnrealEngine` ("Repository not found", checked
+   2026-11-01). Link one account to an Epic Games account (Epic's account settings, Apps and Accounts,
+   GitHub), accept the EpicGames organisation's invitation, then follow the modding docs' engine page.
+   The modding docs also offer a prebuilt `5.6.1-CSS` editor for Windows; an installed engine carries the
+   headers and Win64 import libraries a game module needs, which may be enough for step 1 without
+   building the engine.
+2. **The compiler** (the Windows PC). Visual Studio 2022 with the "MSVC v143 x64/x86 build tools
+   (v14.38-17.8)" component and Windows SDK 10.0.22621; UBT pinned to it in `BuildConfiguration.xml`
+   (`<WindowsPlatform><CompilerVersion>14.38.33130</CompilerVersion></WindowsPlatform>`). msvc-wine on the
+   Mac was not tried: without the engine's headers it has nothing of ours to compile.
+3. **The build** (the Windows PC). A project with FactoryGame's headers, such as the modding starter
+   project, with `FactoryPreEarlyLoadingScreen` assembled as the recovered-code repository's `STATUS.md`
+   says; target `FactoryGameSteam`, Win64, Shipping, so the DLL's name and its imports
+   (`FactoryGameSteam-Core-Win64-Shipping.dll`...) are the game's. Two builds: plain, for matching, and
+   with `RECOMP_WATERMARK=1`. Bring back to SMART (never to a remote) both DLLs and the plain build's
+   objects (`Intermediate/Build/Win64/x64/FactoryGameSteam/Shipping/FactoryPreEarlyLoadingScreen/*.obj`).
+4. **On the Mac.** `./port decomp <shipped dll> --match <obj>` for each of the three objects, to fix what
+   differs; `./port overlay satisfactory /Volumes/SMART/TheSTouch/satisfactory-overlay --dll <watermark
+   dll>`; the owner starts `./port run satisfactory --overlay /Volumes/SMART/TheSTouch/satisfactory-overlay
+   --kettle` (after `./port steam signin` if Kettle is not signed in): first once as the overlay stands
+   now, with the shipped DLL, then with ours.
+
 ## First milestone: the early loading screen, native
 
 `FactoryPreEarlyLoadingScreen` is the smallest game module and runs first: three source files with
@@ -202,7 +233,8 @@ loading a save.
 Before starting, the owner has to act:
 
 - **Engine access.** Link the owner's GitHub account to Epic and follow the modding docs' steps to the
-  `5.6.1-CSS` repository. The engine source stays outside this repository.
+  `5.6.1-CSS` repository (not done on 2026-11-01: see "Step 1: where it stands"). The engine source stays
+  outside this repository.
 - **Recovered code lives on the owner's disks only** (decided 2026-11-01): see below.
 
 ## Where recovered code lives
