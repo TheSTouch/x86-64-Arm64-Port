@@ -43,6 +43,8 @@ class DecompTest(unittest.TestCase):
         self.assertIn("KERNEL32.dll!ExitProcess", text)
         self.assertIn('u"Hello, loading"', text)
         self.assertTrue(text.splitlines()[0].startswith("; FGScreen::Construct"))
+        self.assertIn("; void FGScreen::Construct(char*)", text)
+        self.assertIn("; locals: int Args, int Slot", text)
 
     @unittest.skipUnless(shutil.which("objdump"), "needs objdump (Xcode command line tools)")
     def test_jumps_inside_the_function_read_as_offsets(self):

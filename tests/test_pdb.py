@@ -69,7 +69,7 @@ def build_pdb():
     body += rec(0x1111, struct.pack("<IIH", 0x28, 0x74, 335) + b"Slot\0")
     head = len(rec(0x1110, b"\0" * 35 + b"FGScreen::Construct\0"))
     end_at = len(syms) + head + len(body)  # the S_END closing the procedure
-    proc = rec(0x1110, struct.pack("<IIIIIIIIHB", 0, end_at, 0, 0x40, 4, 0x3C, 0x1234, 0x10, 1, 0)
+    proc = rec(0x1110, struct.pack("<IIIIIIIIHB", 0, end_at, 0, 0x40, 4, 0x3C, 0x1007, 0x10, 1, 0)
                + b"FGScreen::Construct\0")
     syms += proc + body + rec(0x0006, b"")
     syms += rec(0x110F, struct.pack("<IIIIIIIIHB", 0, 0, 0, 0x8, 0, 8, 0, 0x60, 1, 0) + b"`anonymous'::Helper\0")
@@ -155,6 +155,8 @@ class PDBTest(unittest.TestCase):
         self.assertEqual(f.source, "D:\\Game\\Source\\Game\\Private\\Screen.cpp")
         self.assertEqual((f.first_line, f.last_line), (20, 27))
         self.assertEqual(f.locals, ["Args", "Slot"])
+        self.assertEqual(f.local_types, {"Args": 0x74, "Slot": 0x74})
+        self.assertEqual(f.type_index, 0x1007)
         self.assertEqual(f.compiland, "Module.Game.1.cpp.obj")
         self.assertEqual(f.mangled, "?Construct@FGScreen@@QEAAXAEBUFArguments@1@@Z")
         self.assertIsNone(fns[1].source)
@@ -173,6 +175,7 @@ class PDBTest(unittest.TestCase):
         self.assertEqual(t.udt("IBase").members, [(8, "Count", "int")])
         self.assertEqual(t.vtable("Screen"), {0x80: "IBase::InitSettingsFromConfig(char*)"})
         self.assertIsNone(t.udt("Missing"))
+        self.assertEqual(t.declaration(0x1007, "Screen::Load"), "void Screen::Load(char*)")
         self.assertIn("+0x0040  Screen* mWidget", t.describe("Screen"))
         self.assertIn("vtable +0x080  IBase::InitSettingsFromConfig(char*)", t.describe("Screen"))
 

@@ -35,6 +35,13 @@ class Module:
         self.functions = pdb.functions(self.pdb)
         self.names = {self.rva(s, o): n for (s, o), n in pdb.publics(self.pdb).items() if 0 < s <= len(self.image.sections)}
         self.names.update({self.rva(f.segment, f.offset): f.name for f in self.functions})
+        self._types = None
+
+    @property
+    def types(self):
+        if self._types is None:
+            self._types = pdb.Types(self.pdb)
+        return self._types
 
     def rva(self, segment, offset):
         return self.image.sections[segment - 1].vaddr + offset
@@ -87,12 +94,14 @@ class Module:
                               f"--start-address={start:#x}", f"--stop-address={start + (length or f.length):#x}",
                               str(self.dll)], capture_output=True, text=True, check=False)
         lines = [f"; {f.name}",
+                 f"; {self.types.declaration(f.type_index, f.name)}",
                  f"; {Path(f.source.replace(chr(92), '/')).name}:{f.first_line}-{f.last_line}" if f.source else "; no line info",
                  f"; rva {self.rva(f.segment, f.offset):#x}, {f.length} bytes, compiland {f.compiland}"]
         if f.mangled:
             lines.append(f"; {f.mangled}")
         if f.locals:
-            lines.append(f"; locals: {', '.join(f.locals)}")
+            lines.append("; locals: " + ", ".join(
+                f"{self.types.name(f.local_types[n])} {n}" if n in f.local_types else n for n in f.locals))
         for raw in out.stdout.splitlines():
             if not (hit := LINE.match(raw)):
                 continue

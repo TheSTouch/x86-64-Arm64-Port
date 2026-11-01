@@ -35,6 +35,8 @@ class Function:
     last_line: int | None = None
     locals: list = field(default_factory=list)
     mangled: str | None = None
+    type_index: int = 0
+    local_types: dict = field(default_factory=dict)  # local name -> type index
 
 
 class MSF:
@@ -208,8 +210,8 @@ def _module_functions(syms, compiland, lines):
     out, current, end_at, inline_depth = [], None, None, 0
     for off, kind, body in _records(syms, 4):
         if kind in PROCS and len(body) >= 35:
-            _, p_end, _, length, _, _, _, offset, seg = struct.unpack_from("<IIIIIIIIH", body)
-            current = Function(_cstr(body, 35), seg, offset, length, compiland)
+            _, p_end, _, length, _, _, ti, offset, seg = struct.unpack_from("<IIIIIIIIH", body)
+            current = Function(_cstr(body, 35), seg, offset, length, compiland, type_index=ti)
             current.source, current.first_line, current.last_line = lines.get((seg, offset), (None, None, None))
             out.append(current)
             end_at, inline_depth = p_end, 0
@@ -222,9 +224,11 @@ def _module_functions(syms, compiland, lines):
         elif kind == S_INLINESITE_END:
             inline_depth -= 1
         elif inline_depth == 0 and kind == S_LOCAL:
-            current.locals.append(_cstr(body, 6))
+            current.locals.append(name := _cstr(body, 6))
+            current.local_types.setdefault(name, struct.unpack_from("<I", body)[0])
         elif inline_depth == 0 and kind == S_REGREL32:
-            current.locals.append(_cstr(body, 10))
+            current.locals.append(name := _cstr(body, 10))
+            current.local_types.setdefault(name, struct.unpack_from("<I", body, 4)[0])
     return out
 
 
@@ -346,6 +350,13 @@ class Types:
         n = struct.unpack_from("<I", alist)[0] if len(alist) >= 4 else 0
         params = [self.name(struct.unpack_from("<I", alist, 4 + 4 * i)[0], depth + 1) for i in range(n)]
         return f"{name}({', '.join(p for p in params if p != 'void')})"
+
+    def declaration(self, ti, name):
+        """"ret name(params)" for a function type (LF_PROCEDURE or LF_MFUNCTION), else just the name."""
+        kind, body = self.record(ti)
+        if kind not in (LF_PROCEDURE, LF_MFUNCTION):
+            return name
+        return f"{self.name(struct.unpack_from('<I', body)[0])} {self.signature(ti, name)}"
 
     def udt(self, name):
         ti = self._index().get(name)
