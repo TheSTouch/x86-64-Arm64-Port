@@ -51,9 +51,24 @@ RUNTIMES = {
         # Steam's browser windows stay black unless it runs as a single process:
         # wrapper/steamwebhelper.c takes the helper's place.
         "webhelper_wrapper": True,
+        # The bundled MoltenVK 1.4.0 refuses images with uncompressed views of
+        # compressed formats (VK_IMAGE_CREATE_BLOCK_TEXEL_VIEW_COMPATIBLE_BIT),
+        # which Unreal 5 creates for runtime virtual textures; 1.4.1 and later
+        # make those views by aliasing heap memory on Apple GPUs.
+        "moltenvk": "1.4.2",
     },
 }
 DEFAULT_RUNTIME = "wine11"
+
+# MoltenVK releases a runtime can use instead of the one it bundles ("moltenvk"
+# above). Khronos's own macOS build, universal (Wine's Unix side is x86_64).
+MOLTENVK = {
+    "1.4.2": {
+        "url": "https://github.com/KhronosGroup/MoltenVK/releases/download/v1.4.2/MoltenVK-macos.tar",
+        "sha256": "f95765a6229cb7b915990a2890ce12ebe36a730b021545d3d52ae69ce4c4024e",
+        "member": "MoltenVK/MoltenVK/dynamic/dylib/macOS/libMoltenVK.dylib",
+    },
+}
 
 # DXMT (DirectX 10/11 -> Metal), builtin-DLL build. sha256 pinned on first download.
 DXMT = {

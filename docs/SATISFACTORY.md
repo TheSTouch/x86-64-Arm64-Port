@@ -63,3 +63,16 @@ vkCreateImage -> -8 type=2D format=BC5_UNORM_BLOCK extent=7208x7208x1 mips=1 lay
 - **The game does create the views.** With `IMAGELOG_STRIP_BLOCK_TEXEL=1`, MoltenVK 1.4.0 accepted
   the image, Unreal created the `R32G32B32A32_UINT` and `R32G32_UINT` views, and the menu map
   loaded. A driver that accepted the image but refused the views would only move the failure.
+
+## Getting past it: MoltenVK 1.4.2 (A-2)
+
+MoltenVK 1.4.1 added `VK_IMAGE_CREATE_BLOCK_TEXEL_VIEW_COMPATIBLE_BIT` on Apple GPUs (commit
+`744d3ea3`): the image lives in a placement heap (`MVK_CONFIG_USE_MTLHEAP`, on by default on
+Apple GPUs), and an uncompressed view is a second texture of the view's format and block size over
+the same memory. The `wine11` runtime bundles 1.4.0, so `./port setup` now lays Khronos's 1.4.2
+macOS build over it, pinned by checksum in [portkit/config.py](../portkit/config.py) (`MOLTENVK`,
+and `"moltenvk"` in the runtime). The bundled library stays next to it as
+`libMoltenVK.dylib.bundled`, and `./port doctor` shows the version in use. No patch was needed.
+
+With 1.4.2 the layer shows both RVT physical textures created, and the menu map loads (31 s).
+`-dpcvars=r.VT.RVT.DirectCompress=0` is gone from the game file: the shipping build ignores it.
