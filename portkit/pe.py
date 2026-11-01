@@ -1,7 +1,7 @@
 """A small read-only parser for Windows PE files (.exe, .dll).
 
 Reads what the inspector needs: headers, sections, imports, delay imports,
-export count, TLS callbacks and the CodeView (PDB) path. Nothing is executed.
+exports, TLS callbacks and the CodeView (PDB) path. Nothing is executed.
 """
 
 import math
@@ -51,6 +51,8 @@ class PE:
     imports: dict = field(default_factory=dict)
     delay_imports: dict = field(default_factory=dict)
     exports: int = 0
+    export_names: list = field(default_factory=list)
+    export_dll: str = ""
     tls_callbacks: int = 0
     pdb: str | None = None
 
@@ -217,7 +219,11 @@ def _parse(path, buf, with_entropy):
     if dirs[DIR_DELAY_IMPORT][0]:
         pe.delay_imports = _delay_imports(r, dirs[DIR_DELAY_IMPORT][0], wide)
     if dirs[DIR_EXPORT][0]:
-        pe.exports = r.u32(dirs[DIR_EXPORT][0] + 20)
+        exp = dirs[DIR_EXPORT][0]
+        pe.exports = r.u32(exp + 20)
+        pe.export_dll = r.cstr(r.u32(exp + 12))
+        names = r.u32(exp + 32)
+        pe.export_names = [r.cstr(r.u32(names + 4 * i)) for i in range(min(r.u32(exp + 24), 65536))]
     if dirs[DIR_TLS][0]:
         cb_va = r.u64(dirs[DIR_TLS][0] + 24) if wide else r.u32(dirs[DIR_TLS][0] + 12)
         rva, n = cb_va - image_base, 0
