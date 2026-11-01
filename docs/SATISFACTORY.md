@@ -76,3 +76,50 @@ and `"moltenvk"` in the runtime). The bundled library stays next to it as
 
 With 1.4.2 the layer shows both RVT physical textures created, and the menu map loads (31 s).
 `-dpcvars=r.VT.RVT.DirectCompress=0` is gone from the game file: the shipping build ignores it.
+`r.VT.RVT.DirectCompress=0` is still needed, though, now through `-ini:` (A-3 below): with the
+direct path, which writes the blocks through MoltenVK's aliased views, the menu's first frames hang
+("GameThread timed out waiting for RenderThread after 120 seconds", then "Application Hang
+Detected").
+
+## Failing pipelines (A-3)
+
+`IMAGELOG_DUMP=<folder>` makes the layer write every shader module once (`<hash>.spv`) and, for
+each pipeline the driver fails to create, a record (`pipeline-<n>-<kind>.txt`: stages, entry
+points, specialization, descriptor set and pipeline layouts). `runtime/layers/imagelog/replay
+<records>` rebuilds compute pipelines from those records on the runtime's MoltenVK (or the driver
+`VK_DRIVER_FILES` names), outside the game. On MoltenVK 1.4.2 a run fails 17 pipelines:
+
+- **16 compute pipelines are Intel XeSS's** (`XeSS_i10_pipeline_state` …, compiled from DXIL:
+  `RootConstants`, `registers`, `SSBO`). Every binding of their layouts is
+  `VK_DESCRIPTOR_TYPE_MUTABLE_EXT`, from `VK_EXT_mutable_descriptor_type`, which MoltenVK does not
+  offer (Unreal's own log lists it as unsupported). With argument buffers, SPIRV-Cross pads unused
+  slots (set 0 binding 1 here) using each binding's resource type, and a mutable binding has none:
+  "Argument buffer resource base type could not be determined". With
+  `MVK_CONFIG_USE_METAL_ARGUMENT_BUFFERS=0` they fail in Metal instead. MoltenVK 1.4.2 still fails
+  them, and `replay` reproduces all 16. SPIRV-Cross is not at fault: the fix is MoltenVK supporting
+  mutable descriptors (feasible with Metal 3 argument buffers, which hold any resource ID; SPIRV-Cross
+  already aliases descriptors on Metal 3). It is not needed to play: XeSS initialises at start, the
+  failure is not fatal, and XeSS stays unavailable.
+- **The fatal one is a graphics pipeline with a geometry shader.** Vertex `DrawRectangle`, a
+  geometry shader that emits 18 vertices with `gl_Layer` (the six faces of a cube) and a fragment
+  shader that samples `ShadowDepthCubeTexture` and writes depth: `FCopyShadowMapsCubeGS` /
+  `FCopyShadowMapsCubePS` (`CopyShadowMaps.usf`), which copy a point light's cached static shadow
+  depths into its shadow cube. Metal has no geometry shaders and MoltenVK reports
+  `geometryShader = false` (Unreal logs "Geometry 0"), but Unreal's `VULKAN_SM5` platform still
+  compiles and uses this one. MoltenVK drops the stage, so the vertex shader's outputs meet the
+  fragment shader's inputs and Metal refuses: "Fragment input(s) `user(locn1)` mismatching vertex
+  shader output type(s) or not written by vertex shader". Unreal stops on it
+  (VulkanPipeline.cpp:1666) in the menu's first frames.
+
+**Settings that reach the game.** The shipping build ignores `-dpcvars=`, but applies Unreal's
+command-line ini override, and the game file now passes both settings that way:
+
+```
+-ini:Engine:[SystemSettings]:r.VT.RVT.DirectCompress=0,[SystemSettings]:r.Shadow.CacheWholeSceneShadows=0
+```
+
+`r.Shadow.CacheWholeSceneShadows=0` turns off the point-light shadow cache, so the copy with the
+geometry shader never runs. The same lines under `[SystemSettings]` in the prefix's user
+`Engine.ini` work too (the game keeps that section), but the command line keeps everything in the
+game file. With both, the game reaches the main menu on MoltenVK 1.4.2, and the only failing
+pipelines left are XeSS's.

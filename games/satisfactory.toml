@@ -13,7 +13,17 @@ launch = "steam"
 # or later (wine11 installs 1.4.2) for the runtime virtual textures, which are
 # written through uncompressed views of compressed images: docs/SATISFACTORY.md.
 # DirectX 11 needs DXMT, which stock Wine 11 cannot load yet.
-args = ["-vulkan"]
+# Console variables go in -ini:Engine:[SystemSettings]:... (the shipping build
+# applies it; it ignores -dpcvars):
+# - r.VT.RVT.DirectCompress=0: with MoltenVK's aliased uncompressed views the
+#   direct path hangs the GPU in the menu's first frames;
+# - r.Shadow.CacheWholeSceneShadows=0: the cached point-light shadow copy uses
+#   a geometry shader, which Metal does not have (the pipeline fails and the
+#   game quits).
+args = [
+    "-vulkan",
+    "-ini:Engine:[SystemSettings]:r.VT.RVT.DirectCompress=0,[SystemSettings]:r.Shadow.CacheWholeSceneShadows=0",
+]
 runtime = "wine11"
 
 [env]

@@ -2,9 +2,9 @@
 # Builds VK_LAYER_PORTKIT_imagelog (x86_64, for Wine under Rosetta) into
 # runtime/layers/imagelog. Usage: layers/imagelog/build.sh [--test]
 #
-# --test also builds blocktexel.c and runs it on the wine11 runtime's loader
-# and MoltenVK (or the driver whose ICD manifest VK_DRIVER_FILES names), with
-# the layer on.
+# Also builds replay (replays pipelines the layer dumped). --test also builds
+# blocktexel.c and runs it on the wine11 runtime's loader and MoltenVK (or the
+# driver whose ICD manifest VK_DRIVER_FILES names), with the layer on.
 set -eu
 here=$(cd "$(dirname "$0")" && pwd)
 root=$(cd "$here/../.." && pwd)
@@ -40,11 +40,19 @@ cat > "$out/imagelog.json" <<JSON
 JSON
 echo "$out"
 
+# Tools that talk to the runtime's own loader (its install name is a bare
+# "libvulkan.dylib", so point them at it): replay.c, and blocktexel.c for --test.
+wine="$home/runtime/wine11-11.21/Wine Staging.app/Contents/Resources/wine"
+tool() {
+    clang -arch x86_64 -O1 -Wall -I"$headers/include" -DDEFAULT_ICD="\"$wine/share/vulkan/icd.d/MoltenVK_icd.json\"" \
+        -o "$out/$1" "$here/$1.c" "$wine/lib/libvulkan.1.dylib" \
+        -Wl,-headerpad_max_install_names
+    install_name_tool -change libvulkan.dylib "$wine/lib/libvulkan.1.dylib" "$out/$1"
+}
+tool replay
+
 if [ "${1:-}" = --test ]; then
-    wine="$home/runtime/wine11-11.21/Wine Staging.app/Contents/Resources/wine"
-    clang -arch x86_64 -O1 -Wall -I"$headers/include" -o "$out/blocktexel" "$here/blocktexel.c" \
-        "$wine/lib/libvulkan.1.dylib"
-    DYLD_FALLBACK_LIBRARY_PATH="$wine/lib" \
+    tool blocktexel
     VK_DRIVER_FILES=${VK_DRIVER_FILES:-$wine/share/vulkan/icd.d/MoltenVK_icd.json} \
     VK_ADD_LAYER_PATH=$out VK_INSTANCE_LAYERS=VK_LAYER_PORTKIT_imagelog \
         "$out/blocktexel"

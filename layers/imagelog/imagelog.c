@@ -15,9 +15,15 @@
  * another format. IMAGELOG_STRIP_BLOCK_TEXEL=1 drops
  * VK_IMAGE_CREATE_BLOCK_TEXEL_VIEW_COMPATIBLE_BIT before the driver sees it
  * (an experiment: does the game then create such a view at all?).
+ *
+ * IMAGELOG_DUMP=<folder> also writes every shader module there once
+ * (<hash>.spv) and, for each pipeline the driver fails to create, a record
+ * (pipeline-<n>.txt: stages, specialization, descriptor set and pipeline
+ * layouts) that replay.c can feed back to a driver outside the game.
  */
 
 #include <pthread.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -43,6 +49,11 @@ typedef struct {
     PFN_vkCreateImage create_image;
     PFN_vkDestroyImage destroy_image;
     PFN_vkCreateImageView create_image_view;
+    PFN_vkCreateShaderModule create_shader_module;
+    PFN_vkCreateDescriptorSetLayout create_set_layout;
+    PFN_vkCreatePipelineLayout create_pipeline_layout;
+    PFN_vkCreateComputePipelines create_compute_pipelines;
+    PFN_vkCreateGraphicsPipelines create_graphics_pipelines;
 } device_t;
 
 /* Images created with a flag that allows views in another format. */
@@ -63,6 +74,7 @@ static instance_t instances[MAX_INSTANCES];
 static device_t devices[MAX_DEVICES];
 static image_t images[MAX_IMAGES];
 static int log_all = -1, strip_block_texel = -1;
+static const char *dump_dir;
 static unsigned long image_count, logged_count;
 
 static void *key_of(const void *dispatchable) { return *(void **)dispatchable; }
@@ -87,6 +99,8 @@ static void settings(void) {
     log_all = v && !strcmp(v, "all");
     v = getenv("IMAGELOG_STRIP_BLOCK_TEXEL");
     strip_block_texel = v && *v && strcmp(v, "0");
+    dump_dir = getenv("IMAGELOG_DUMP");
+    if (dump_dir && !*dump_dir) dump_dir = NULL;
     fprintf(stderr, "imagelog: loaded in pid %d (all=%d strip_block_texel=%d)\n", getpid(), log_all,
             strip_block_texel);
 }
@@ -256,6 +270,195 @@ static VKAPI_ATTR VkResult VKAPI_CALL CreateImageView(VkDevice device, const VkI
     return r;
 }
 
+/* ---- failing pipelines (IMAGELOG_DUMP) ---- */
+
+/* Handle -> data tables, open addressing; entries are never removed (handles
+ * of destroyed objects are rarely reused before a game ends, and a stale entry
+ * only matters if a failing pipeline names it). */
+#define TABLE 65536
+
+typedef struct { uint64_t handle, hash; } module_t;
+
+typedef struct {
+    uint64_t handle;
+    VkDescriptorSetLayoutCreateFlags flags;
+    uint32_t count;
+    VkDescriptorSetLayoutBinding *bindings;
+    VkDescriptorBindingFlags *binding_flags; /* NULL when not given */
+} set_layout_t;
+
+typedef struct {
+    uint64_t handle;
+    uint32_t set_count, push_count;
+    uint64_t *sets;
+    VkPushConstantRange *push;
+} pipeline_layout_t;
+
+static module_t modules[TABLE];
+static set_layout_t set_layouts[TABLE];
+static pipeline_layout_t pipeline_layouts[TABLE];
+static unsigned long pipeline_failures;
+
+static uint32_t slot_of(uint64_t h) { return (uint32_t)((h * 0x9e3779b97f4a7c15ull) >> 48) & (TABLE - 1); }
+
+#define FIND(table, h)                                                              \
+    ({                                                                              \
+        uint32_t i_ = slot_of(h);                                                   \
+        while (table[i_].handle && table[i_].handle != (h)) i_ = (i_ + 1) & (TABLE - 1); \
+        &table[i_];                                                                 \
+    })
+
+static uint64_t fnv1a(const void *data, size_t n) {
+    uint64_t h = 0xcbf29ce484222325ull;
+    for (size_t i = 0; i < n; i++) h = (h ^ ((const uint8_t *)data)[i]) * 0x100000001b3ull;
+    return h;
+}
+
+static uint64_t save_spirv(const uint32_t *code, size_t size) {
+    uint64_t hash = fnv1a(code, size);
+    char path[1024];
+    snprintf(path, sizeof path, "%s/%016llx.spv", dump_dir, (unsigned long long)hash);
+    if (access(path, F_OK)) {
+        FILE *f = fopen(path, "wb");
+        if (f) {
+            fwrite(code, 1, size, f);
+            fclose(f);
+        }
+    }
+    return hash;
+}
+
+static VKAPI_ATTR VkResult VKAPI_CALL CreateShaderModule(VkDevice device, const VkShaderModuleCreateInfo *info,
+                                                         const VkAllocationCallbacks *alloc, VkShaderModule *module) {
+    VkResult r = find_device(device)->create_shader_module(device, info, alloc, module);
+    if (r == VK_SUCCESS && dump_dir) {
+        uint64_t hash = save_spirv(info->pCode, info->codeSize);
+        pthread_mutex_lock(&lock);
+        module_t *m = FIND(modules, (uint64_t)*module);
+        *m = (module_t){(uint64_t)*module, hash};
+        pthread_mutex_unlock(&lock);
+    }
+    return r;
+}
+
+static VKAPI_ATTR VkResult VKAPI_CALL CreateDescriptorSetLayout(VkDevice device,
+                                                                const VkDescriptorSetLayoutCreateInfo *info,
+                                                                const VkAllocationCallbacks *alloc,
+                                                                VkDescriptorSetLayout *layout) {
+    VkResult r = find_device(device)->create_set_layout(device, info, alloc, layout);
+    if (r == VK_SUCCESS && dump_dir) {
+        set_layout_t l = {(uint64_t)*layout, info->flags, info->bindingCount, NULL, NULL};
+        l.bindings = calloc(info->bindingCount + 1, sizeof *l.bindings);
+        memcpy(l.bindings, info->pBindings, info->bindingCount * sizeof *l.bindings);
+        for (const VkBaseInStructure *p = info->pNext; p; p = p->pNext)
+            if (p->sType == VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO) {
+                const VkDescriptorSetLayoutBindingFlagsCreateInfo *f = (const void *)p;
+                if (f->bindingCount == info->bindingCount) {
+                    l.binding_flags = calloc(f->bindingCount + 1, sizeof *l.binding_flags);
+                    memcpy(l.binding_flags, f->pBindingFlags, f->bindingCount * sizeof *l.binding_flags);
+                }
+            }
+        pthread_mutex_lock(&lock);
+        *FIND(set_layouts, l.handle) = l;
+        pthread_mutex_unlock(&lock);
+    }
+    return r;
+}
+
+static VKAPI_ATTR VkResult VKAPI_CALL CreatePipelineLayout(VkDevice device, const VkPipelineLayoutCreateInfo *info,
+                                                           const VkAllocationCallbacks *alloc,
+                                                           VkPipelineLayout *layout) {
+    VkResult r = find_device(device)->create_pipeline_layout(device, info, alloc, layout);
+    if (r == VK_SUCCESS && dump_dir) {
+        pipeline_layout_t l = {(uint64_t)*layout, info->setLayoutCount, info->pushConstantRangeCount, NULL, NULL};
+        l.sets = calloc(info->setLayoutCount + 1, sizeof *l.sets);
+        for (uint32_t i = 0; i < info->setLayoutCount; i++) l.sets[i] = (uint64_t)info->pSetLayouts[i];
+        l.push = calloc(info->pushConstantRangeCount + 1, sizeof *l.push);
+        memcpy(l.push, info->pPushConstantRanges, info->pushConstantRangeCount * sizeof *l.push);
+        pthread_mutex_lock(&lock);
+        *FIND(pipeline_layouts, l.handle) = l;
+        pthread_mutex_unlock(&lock);
+    }
+    return r;
+}
+
+/* Writes the record replay.c reads; the caller holds the lock. */
+static void dump_pipeline(const char *kind, VkResult r, VkPipelineCreateFlags flags, uint32_t stage_count,
+                          const VkPipelineShaderStageCreateInfo *stages, VkPipelineLayout layout) {
+    char path[1024];
+    snprintf(path, sizeof path, "%s/pipeline-%04lu-%s.txt", dump_dir, ++pipeline_failures, kind);
+    FILE *f = fopen(path, "w");
+    if (!f) return;
+    fprintf(f, "pipeline %s result %d flags 0x%x\n", kind, r, flags);
+    pipeline_layout_t *pl = FIND(pipeline_layouts, (uint64_t)layout);
+    for (uint32_t i = 0; pl->handle && i < pl->push_count; i++)
+        fprintf(f, "push %u %u %u\n", pl->push[i].stageFlags, pl->push[i].offset, pl->push[i].size);
+    for (uint32_t s = 0; pl->handle && s < pl->set_count; s++) {
+        set_layout_t *sl = FIND(set_layouts, pl->sets[s]);
+        fprintf(f, "set %u flags 0x%x bindings %u\n", s, sl->flags, sl->handle ? sl->count : 0);
+        for (uint32_t b = 0; sl->handle && b < sl->count; b++) {
+            const VkDescriptorSetLayoutBinding *x = &sl->bindings[b];
+            fprintf(f, "binding %u type %d count %u stages 0x%x flags 0x%x immutable %d\n", x->binding,
+                    x->descriptorType, x->descriptorCount, x->stageFlags,
+                    sl->binding_flags ? sl->binding_flags[b] : 0, x->pImmutableSamplers != NULL);
+        }
+    }
+    for (uint32_t i = 0; i < stage_count; i++) {
+        const VkPipelineShaderStageCreateInfo *st = &stages[i];
+        uint64_t hash = 0;
+        if (st->module) {
+            hash = FIND(modules, (uint64_t)st->module)->hash;
+        } else {
+            for (const VkBaseInStructure *p = st->pNext; p; p = p->pNext)
+                if (p->sType == VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO) {
+                    const VkShaderModuleCreateInfo *m = (const void *)p;
+                    hash = save_spirv(m->pCode, m->codeSize);
+                }
+        }
+        fprintf(f, "stage 0x%x module %016llx entry %s\n", st->stage, (unsigned long long)hash, st->pName);
+        const VkSpecializationInfo *sp = st->pSpecializationInfo;
+        for (uint32_t m = 0; sp && m < sp->mapEntryCount; m++)
+            fprintf(f, "spec %u %u %zu\n", sp->pMapEntries[m].constantID, sp->pMapEntries[m].offset,
+                    sp->pMapEntries[m].size);
+        if (sp && sp->dataSize) {
+            fprintf(f, "specdata ");
+            for (size_t b = 0; b < sp->dataSize; b++) fprintf(f, "%02x", ((const uint8_t *)sp->pData)[b]);
+            fprintf(f, "\n");
+        }
+    }
+    fclose(f);
+    fprintf(stderr, "imagelog: %s pipeline failed (%d): %s\n", kind, r, path);
+}
+
+static VKAPI_ATTR VkResult VKAPI_CALL CreateComputePipelines(VkDevice device, VkPipelineCache cache, uint32_t count,
+                                                             const VkComputePipelineCreateInfo *infos,
+                                                             const VkAllocationCallbacks *alloc,
+                                                             VkPipeline *pipelines) {
+    VkResult r = find_device(device)->create_compute_pipelines(device, cache, count, infos, alloc, pipelines);
+    if (r != VK_SUCCESS && dump_dir) {
+        pthread_mutex_lock(&lock);
+        for (uint32_t i = 0; i < count; i++)
+            if (!pipelines[i]) dump_pipeline("compute", r, infos[i].flags, 1, &infos[i].stage, infos[i].layout);
+        pthread_mutex_unlock(&lock);
+    }
+    return r;
+}
+
+static VKAPI_ATTR VkResult VKAPI_CALL CreateGraphicsPipelines(VkDevice device, VkPipelineCache cache, uint32_t count,
+                                                              const VkGraphicsPipelineCreateInfo *infos,
+                                                              const VkAllocationCallbacks *alloc,
+                                                              VkPipeline *pipelines) {
+    VkResult r = find_device(device)->create_graphics_pipelines(device, cache, count, infos, alloc, pipelines);
+    if (r != VK_SUCCESS && dump_dir) {
+        pthread_mutex_lock(&lock);
+        for (uint32_t i = 0; i < count; i++)
+            if (!pipelines[i])
+                dump_pipeline("graphics", r, infos[i].flags, infos[i].stageCount, infos[i].pStages, infos[i].layout);
+        pthread_mutex_unlock(&lock);
+    }
+    return r;
+}
+
 /* ---- instance and device plumbing ---- */
 
 static VkLayerInstanceCreateInfo *instance_chain(const VkInstanceCreateInfo *info) {
@@ -324,6 +527,11 @@ static VKAPI_ATTR VkResult VKAPI_CALL CreateDevice(VkPhysicalDevice gpu, const V
                 (PFN_vkCreateImage)gdpa(*device, "vkCreateImage"),
                 (PFN_vkDestroyImage)gdpa(*device, "vkDestroyImage"),
                 (PFN_vkCreateImageView)gdpa(*device, "vkCreateImageView"),
+                (PFN_vkCreateShaderModule)gdpa(*device, "vkCreateShaderModule"),
+                (PFN_vkCreateDescriptorSetLayout)gdpa(*device, "vkCreateDescriptorSetLayout"),
+                (PFN_vkCreatePipelineLayout)gdpa(*device, "vkCreatePipelineLayout"),
+                (PFN_vkCreateComputePipelines)gdpa(*device, "vkCreateComputePipelines"),
+                (PFN_vkCreateGraphicsPipelines)gdpa(*device, "vkCreateGraphicsPipelines"),
             };
             break;
         }
@@ -346,6 +554,8 @@ static VKAPI_ATTR void VKAPI_CALL DestroyDevice(VkDevice device, const VkAllocat
 static PFN_vkVoidFunction device_hook(const char *name) {
 #define HOOK(n) if (!strcmp(name, "vk" #n)) return (PFN_vkVoidFunction)n;
     HOOK(CreateImage) HOOK(DestroyImage) HOOK(CreateImageView) HOOK(DestroyDevice)
+    HOOK(CreateShaderModule) HOOK(CreateDescriptorSetLayout) HOOK(CreatePipelineLayout)
+    HOOK(CreateComputePipelines) HOOK(CreateGraphicsPipelines)
 #undef HOOK
     return NULL;
 }
