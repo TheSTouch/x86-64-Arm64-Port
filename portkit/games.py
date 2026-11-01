@@ -56,6 +56,18 @@ class Game:
         return self.root / self.exe if self.root and self.exe else None
 
     @property
+    def launcher_path(self):
+        """What Steam starts: Unreal's launcher stub at the top (FactoryGameSteam.exe), which starts
+        Binaries/Win64/<Name>-Win64-Shipping.exe with the project; else the executable itself.
+        Started directly, the shipping exe looks for <Name>.uproject and quits."""
+        exe = self.exe_path
+        if exe and self.root and exe.name.lower().endswith("-win64-shipping.exe"):
+            stub = self.root / (exe.name[:-len("-Win64-Shipping.exe")] + ".exe")
+            if stub.exists():
+                return stub
+        return exe
+
+    @property
     def available(self):
         return bool(self.exe_path and self.exe_path.exists())
 

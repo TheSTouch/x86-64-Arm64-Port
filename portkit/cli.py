@@ -5,7 +5,7 @@ import shutil
 import subprocess
 import sys
 
-from . import bench, config, games, inspect, runtime, session, steam, trace, wine
+from . import bench, config, games, inspect, kettle, runtime, session, steam, trace, wine
 from .util import Fail, free_gb, step, sysctl
 
 
@@ -83,6 +83,13 @@ def cmd_steam(a):
         if not a.args:
             raise Fail("usage: ./port steam library <path to a Windows Steam library>")
         steam.add_library(a.runtime, a.args[0])
+    elif a.action == "inventory":
+        if not a.args:
+            raise Fail("usage: ./port steam inventory <game>")
+        g = games.load(a.args[0])
+        session.ready(g)
+        report = kettle.run_inventory(g, session.report_dir(g, "steam-inventory"))
+        step(f"Inventory of the Steamworks API {g.name} uses: {report}")
     return 0
 
 
@@ -180,8 +187,9 @@ def parser():
     sp.set_defaults(fn=cmd_setup)
 
     sp = prefixed(sub.add_parser("steam", help="Windows Steam in the prefix"))
-    sp.add_argument("action", choices=["install", "start", "stop", "library"])
-    sp.add_argument("args", nargs="*", help="library: the library folder; start: extra Steam arguments")
+    sp.add_argument("action", choices=["install", "start", "stop", "library", "inventory"])
+    sp.add_argument("args", nargs="*", help="library: the library folder; start: extra Steam arguments; "
+                    "inventory: a game, run with a logging steam_api64.dll and no Steam")
     sp.set_defaults(fn=cmd_steam)
 
     sp = prefixed(sub.add_parser("wine", help="run a program in the prefix (winecfg, regedit...)"))

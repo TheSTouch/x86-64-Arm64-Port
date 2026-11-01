@@ -39,19 +39,24 @@ ZIG_VENV = config.RUNTIME_DIR / "tools/zig-venv"
 WRAPPER_MAX_SIZE = 500_000  # the real helper is several MB
 
 
-def build_wrapper():
-    """Cross-compile wrapper/steamwebhelper.c with Zig (from pip, kept in runtime/tools)."""
-    if WRAPPER_EXE.exists() and WRAPPER_EXE.stat().st_mtime >= WRAPPER_SOURCE.stat().st_mtime:
-        return WRAPPER_EXE
+def zig_cc():
+    """`zig cc` for cross-compiling Windows C: Zig from pip, kept in runtime/tools."""
     python = ZIG_VENV / "bin/python"
     if not python.exists():
-        step("Installing the Zig compiler (pip, into runtime/tools) to build the web helper wrapper")
+        step("Installing the Zig compiler (pip, into runtime/tools) to build Windows programs")
         run(["python3", "-m", "venv", ZIG_VENV])
         run([python, "-m", "pip", "-q", "install", "ziglang"])
+    return [python, "-m", "ziglang", "cc", "-target", "x86_64-windows-gnu"]
+
+
+def build_wrapper():
+    """Cross-compile wrapper/steamwebhelper.c with Zig."""
+    if WRAPPER_EXE.exists() and WRAPPER_EXE.stat().st_mtime >= WRAPPER_SOURCE.stat().st_mtime:
+        return WRAPPER_EXE
+    cc = zig_cc()
     step("Building the Steam web helper wrapper")
     WRAPPER_EXE.parent.mkdir(parents=True, exist_ok=True)
-    run([python, "-m", "ziglang", "cc", "-target", "x86_64-windows-gnu", "-municode", "-Wl,--subsystem,windows",
-         "-O2", "-s", "-o", WRAPPER_EXE, WRAPPER_SOURCE])
+    run([*cc, "-municode", "-Wl,--subsystem,windows", "-O2", "-s", "-o", WRAPPER_EXE, WRAPPER_SOURCE])
     return WRAPPER_EXE
 
 
