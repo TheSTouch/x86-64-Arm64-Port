@@ -173,6 +173,15 @@ def cmd_inspect(a):
 
 
 def cmd_decomp(a):
+    if a.match:
+        results = decomp.match(a.dll, a.match)
+        for r in results:
+            shipped = f"  [{r.shipped}]" if r.shipped else ""
+            print(f"{r.state:<8} {r.name}{shipped}" + (f": {r.detail}" if r.detail else ""))
+        counts = {s: sum(r.state == s for r in results) for s in ("matched", "differs", "missing")}
+        print(f"{len(results)} functions: {counts['matched']} matched, {counts['differs']} differing, "
+              f"{counts['missing']} not in the shipped module", file=sys.stderr)
+        return 1 if counts["differs"] else 0
     if a.out:
         root, fns = decomp.dump(a.dll, a.out, a.source)
         print(f"{len(fns)} functions ({sum(f.length for f in fns)} bytes) written to {root}")
@@ -280,6 +289,8 @@ def parser():
     sp.add_argument("--disasm", metavar="NAME", help="disassemble one function (name or decorated name)")
     sp.add_argument("--type", metavar="NAME", help="a class, struct or enum: layout, members, vtable slots")
     sp.add_argument("--out", metavar="DIR", help="write functions.tsv and one .asm per function (outside this repository)")
+    sp.add_argument("--match", metavar="OBJ", help="compare each function of a compiled .obj with the shipped one "
+                    "(relocated operands masked): matched, or the first difference")
     sp.set_defaults(fn=cmd_decomp)
 
     def game_cmd(name, help_):

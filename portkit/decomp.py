@@ -4,15 +4,16 @@ The disassembly names what each instruction reaches: imported functions (through
 the import address table), the module's own functions (from the PDB) and string
 literals. What `dump` writes is derived from the game, so it refuses to write
 inside this repository (docs/SATISFACTORY-RECOMP.md: recovered code stays on the
-owner's disks).
+owner's disks). `match` compares a compiled object file with the shipped module.
 """
 
 import re
 import shutil
 import subprocess
+from dataclasses import dataclass
 from pathlib import Path
 
-from . import config, pdb, pe
+from . import coff, config, pdb, pe
 from .util import Fail
 
 ADDRESS = re.compile(r"0x([0-9a-f]{6,16})")
@@ -152,3 +153,86 @@ def dump(dll, out, source_marker=None):
         target.write_text(m.disassemble(f), encoding="utf-8")
     (root / "functions.tsv").write_text("\n".join(rows) + "\n", encoding="utf-8")
     return root, fns
+
+
+@dataclass
+class Match:
+    name: str            # the object file's (decorated) name
+    state: str           # matched, differs, missing
+    shipped: str = ""    # the shipped function's name, from the PDB
+    length: int = 0
+    offset: int = None   # the first difference
+    detail: str = ""
+
+
+def qualified_name(decorated):
+    """"Scope::Name" from a plain MSVC decorated name (?Name@Scope@@...); None for operators,
+    constructors, templates and undecorated names."""
+    if not decorated.startswith("?") or decorated[1:2] in ("?", "$"):
+        return None
+    head, sep, _ = decorated[1:].partition("@@")
+    parts = head.split("@")
+    if not sep or not all(re.fullmatch(r"[A-Za-z_]\w*", p) for p in parts):
+        return None
+    return "::".join(reversed(parts))
+
+
+def match(dll, obj):
+    """Each function of a compiled COFF object against the shipped function of the same decorated name
+    (a public symbol), or else of the same qualified name when only one function has it. Bytes a
+    relocation fills are masked on both sides: the shipped code has the linker's values there."""
+    try:
+        o = coff.parse(Path(obj).read_bytes())
+    except coff.NotCOFF as e:
+        raise Fail(f"{obj}: {e}")
+    m = Module(dll)
+    by_mangled = {f.mangled: f for f in m.functions if f.mangled}
+    by_name = {}
+    for f in m.functions:
+        by_name.setdefault(f.name, []).append(f)
+    results = []
+    for fn in o.functions():
+        shipped, how = by_mangled.get(fn.name), ""
+        if shipped is None:
+            candidates = by_name.get(qualified_name(fn.name), [])
+            if len(candidates) == 1:
+                shipped, how = candidates[0], "by name"
+        if shipped is None:
+            results.append(Match(fn.name, "missing", detail="no function of that name in the shipped module"))
+            continue
+        results.append(_compare(m, fn, shipped, how))
+    return results
+
+
+def _compare(m, fn, shipped, how):
+    ref = m._bytes_at(m.rva(shipped.segment, shipped.offset), shipped.length)
+    result = Match(fn.name, "matched", shipped.name, len(ref))
+    notes = [how] if how else []
+    first = next((i for i in range(min(len(ref), len(fn.code))) if i not in fn.masked and ref[i] != fn.code[i]), None)
+    if first is None and len(ref) != len(fn.code):
+        first = min(len(ref), len(fn.code))
+        notes.insert(0, f"length: shipped {len(ref):#x} bytes, compiled {len(fn.code):#x} bytes")
+    if first is None:
+        result.detail = ", ".join([f"{len(fn.masked)} relocated bytes masked"] + notes)
+        return result
+
+    def window(code):
+        return " ".join("??" if first + i in fn.masked else f"{b:02x}" for i, b in enumerate(code[first:first + 8]))
+
+    result.state, result.offset = "differs", first
+    where = f"at +{first:#x}"
+    if insn := _instruction_at(m, shipped, first):
+        where += f" (shipped: {insn})"
+    result.detail = ", ".join([f"{where}: shipped {window(ref) or '(end)'}, compiled {window(fn.code) or '(end)'}"] + notes)
+    return result
+
+
+def _instruction_at(m, f, offset):
+    """The shipped instruction covering offset, from the annotated disassembly (needs objdump)."""
+    if not shutil.which("objdump"):
+        return None
+    best = None
+    for line in m.disassemble(f).splitlines():
+        if (hit := re.match(r"^\s+\+([0-9a-f]{5})\s+(.*?)\s*(;.*)?$", line)) and int(hit.group(1), 16) <= offset:
+            best = re.sub(r"\s+", " ", hit.group(2))
+    return best

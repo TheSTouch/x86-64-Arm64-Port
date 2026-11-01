@@ -121,7 +121,7 @@ hides it otherwise. A game's `[env]` table and `--env KEY=VALUE` add or override
 | `./port wine -- <program>` | Runs a program in the prefix (`winecfg`, `regedit`, an installer) |
 | `./port games [id]` | Shows each game's resolved settings and whether it is ready |
 | `./port inspect <game\|folder\|file>` | Static report: engine and version, graphics API, middleware, anti-cheat, code protection in every code file, for Unreal builds the modules by origin and the PDBs shipped, and what each route faces. Reads files only |
-| `./port decomp <dll>` | A module's game functions from its PDB (`--disasm NAME`: one function's disassembly, naming imports, functions and strings; `--type NAME`: a class's layout, members and vtable slots; `--out DIR`: a work folder per module, refused inside this repository). Reads files only |
+| `./port decomp <dll>` | A module's game functions from its PDB (`--disasm NAME`: one function's disassembly, naming imports, functions and strings; `--type NAME`: a class's layout, members and vtable slots; `--out DIR`: a work folder per module, refused inside this repository; `--match OBJ`: each function of a compiled `.obj` against the shipped one of the same decorated name, relocated operands masked, matched or the first difference). Reads files only |
 | `./port overlay <game> <dir>` | An overlay game folder: the install linked, files replaced by built ones of the same name (`--dll FILE`, repeatable; its `.pdb` too). Real folders only on the way to a replaced file; never writes to the game, refused inside it or this repository |
 | `./port run <game>` | Plays the game under the Porting Kit (`--kettle`: without Windows Steam; `--overlay DIR`: from an overlay folder, with `--kettle`) |
 | `./port bench <game>` | Benchmarks a scene (`--attach` measures the game already running) |
@@ -182,6 +182,7 @@ instead.
   - `steam.py`: Windows Steam and its libraries.
   - `games.py`: game files and how they are resolved.
   - `pe.py`: a read-only parser for Windows executables.
+  - `coff.py`: a read-only reader for COFF object files (MSVC, regular and `/bigobj`): functions, code, relocations.
   - `pdb.py`: a read-only PDB reader: its signature, functions (source file, lines, locals), public symbols, and types (class layouts, vtable slots).
   - `decomp.py`: work material for recovering a module's source: its game functions and their annotated disassembly.
   - `overlay.py`: overlay game folders, to run the shipped game with modules built from recovered source.

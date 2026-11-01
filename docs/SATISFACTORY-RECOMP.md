@@ -250,5 +250,9 @@ layers/imagelog/build.sh
 - Diff `5.6.1-CSS` against Epic's 5.6.1 tag (which engine modules Coffee Stain changed), and check that
   its tag matches CL 513885.
 - Build the fork for macOS arm64, and check that VulkanRHI is available there.
-- Set up the matching harness: MSVC 14.38.33130 with the flags from the `Build.cs` files, the shipped PDBs as
-  the reference, and a per-function comparison.
+- The matching harness compares, it does not compile: `./port decomp <dll> --match <file.obj>` pairs each
+  function of a compiled object with the shipped one of the same decorated name (the PDB's public symbols;
+  a static function by its qualified name when only one has it), masks the bytes relocations fill, and
+  says matched or where the first difference is, with the shipped instruction there. Still to set up:
+  MSVC 14.38.33130 with the flags UBT passes for `5.6.1-CSS` (on the Windows PC; msvc-wine on the Mac for
+  single files).
