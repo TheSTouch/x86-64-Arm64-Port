@@ -46,6 +46,7 @@ class Game:
     runtime: str = config.DEFAULT_RUNTIME
     env: dict = field(default_factory=dict)
     notes: str = ""
+    overlay: str = ""   # set for one run by ./port run --overlay: start the game from this folder (portkit/overlay.py)
 
     @property
     def prefix(self):
@@ -62,6 +63,14 @@ class Game:
         return self.root / self.exe if self.root and self.exe else None
 
     @property
+    def run_root(self):
+        """Where the game runs from: the install, or the overlay of this run."""
+        return Path(self.overlay) if self.overlay else self.root
+
+    def in_run_root(self, path):
+        return self.run_root / Path(path).relative_to(self.root) if self.overlay and path else path
+
+    @property
     def launcher_path(self):
         """What Steam starts: Unreal's launcher stub at the top (FactoryGameSteam.exe), which starts
         Binaries/Win64/<Name>-Win64-Shipping.exe with the project; else the executable itself.
@@ -70,8 +79,8 @@ class Game:
         if exe and self.root and exe.name.lower().endswith("-win64-shipping.exe"):
             stub = self.root / (exe.name[:-len("-Win64-Shipping.exe")] + ".exe")
             if stub.exists():
-                return stub
-        return exe
+                return self.in_run_root(stub)
+        return self.in_run_root(exe)
 
     @property
     def available(self):

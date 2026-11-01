@@ -97,7 +97,7 @@ def environment(game, root, log=None, base=None):
         "SteamGameId": str(game.steam_appid),
     }
     if game.root:
-        env["PORTKIT_GAME_DIR"] = wine.windows_path(game.root)
+        env["PORTKIT_GAME_DIR"] = wine.windows_path(game.run_root)
         manifest = Path(game.library, "steamapps", f"appmanifest_{game.steam_appid}.acf")
         if manifest.exists():
             from . import vdf

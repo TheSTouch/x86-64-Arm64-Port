@@ -122,7 +122,8 @@ hides it otherwise. A game's `[env]` table and `--env KEY=VALUE` add or override
 | `./port games [id]` | Shows each game's resolved settings and whether it is ready |
 | `./port inspect <game\|folder\|file>` | Static report: engine and version, graphics API, middleware, anti-cheat, code protection in every code file, for Unreal builds the modules by origin and the PDBs shipped, and what each route faces. Reads files only |
 | `./port decomp <dll>` | A module's game functions from its PDB (`--disasm NAME`: one function's disassembly, naming imports, functions and strings; `--type NAME`: a class's layout, members and vtable slots; `--out DIR`: a work folder per module, refused inside this repository). Reads files only |
-| `./port run <game>` | Plays the game under the Porting Kit (`--kettle`: without Windows Steam) |
+| `./port overlay <game> <dir>` | An overlay game folder: the install linked, files replaced by built ones of the same name (`--dll FILE`, repeatable; its `.pdb` too). Real folders only on the way to a replaced file; never writes to the game, refused inside it or this repository |
+| `./port run <game>` | Plays the game under the Porting Kit (`--kettle`: without Windows Steam; `--overlay DIR`: from an overlay folder, with `--kettle`) |
 | `./port bench <game>` | Benchmarks a scene (`--attach` measures the game already running) |
 | `./port trace <game>` | Watches a run for the recompilation plan |
 
@@ -183,6 +184,7 @@ instead.
   - `pe.py`: a read-only parser for Windows executables.
   - `pdb.py`: a read-only PDB reader: its signature, functions (source file, lines, locals), public symbols, and types (class layouts, vtable slots).
   - `decomp.py`: work material for recovering a module's source: its game functions and their annotated disassembly.
+  - `overlay.py`: overlay game folders, to run the shipped game with modules built from recovered source.
   - `inspect.py`: the static report.
   - `session.py`, `bench.py`, `trace.py`: running a game, benchmarking it and watching it.
   - `kettle.py`: builds the Kettle bridge and runs games through it.

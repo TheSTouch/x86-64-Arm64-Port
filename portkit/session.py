@@ -43,8 +43,9 @@ def start(game, *, debug="-all", extra_env=None, log=None, fresh=True):
         exe = game.launcher_path
         step(f"Starting {exe} with our steam_api64.dll (Steam through Kettle, app {game.steam_appid})")
         return wine.spawn(game.prefix, [exe, *game.args], debug, env, log, cwd=exe.parent)
-    step(f"Starting {game.exe_path}")
-    return wine.spawn(game.prefix, [game.exe_path, *game.args], debug, env, log, cwd=game.exe_path.parent)
+    exe = game.in_run_root(game.exe_path)
+    step(f"Starting {exe}")
+    return wine.spawn(game.prefix, [exe, *game.args], debug, env, log, cwd=exe.parent)
 
 
 def report_dir(game, kind, label=""):

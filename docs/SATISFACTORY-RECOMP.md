@@ -158,7 +158,19 @@ build. The first ones run in the shipped game under the Porting Kit, swapping Co
 the recovered code a piece at a time, the way OpenRCT2 replaced RollerCoaster Tycoon's functions one by
 one and the way SML already hooks FactoryGame's functions. Nothing in the game's folder changes: the
 game runs from an overlay folder on SMART (its own `Binaries`, everything else linked to the install),
-started with the Kettle launch mode.
+started with the Kettle launch mode:
+
+```sh
+./port overlay satisfactory /Volumes/SMART/TheSTouch/satisfactory-overlay \
+    --dll <build>/FactoryGameSteam-FactoryPreEarlyLoadingScreen-Win64-Shipping.dll
+./port run satisfactory --overlay /Volumes/SMART/TheSTouch/satisfactory-overlay --kettle
+```
+
+`FactoryGame/`, `FactoryGame/Binaries/` and `FactoryGame/Binaries/Win64/` are real folders there; the rest
+of the install, `Engine/` and the paks included, is linked. Unreal finds the project from the launcher's
+own path, and Wine should report the path it was started from (the overlay's), not the link's target:
+not yet seen with the game. A first run with the shipped DLL copied in (`--dll` a copy
+of Coffee Stain's own) checks the overlay itself before any recovered code is involved.
 
 | Step | What you see | Needs |
 |---|---|---|

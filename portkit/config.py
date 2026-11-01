@@ -16,6 +16,11 @@ PREFIXES = HOME / "prefixes"
 REPORTS = HOME / "reports"
 GAMES_DIR = ROOT / "games"
 
+
+def inside_repository(path):
+    """Whether path is in this repository, where nothing derived from a game may be written."""
+    return Path(path).resolve().is_relative_to(ROOT)
+
 # Wine runtimes. Each gets its own prefix, prefixes/<name>.
 RUNTIMES = {
     # Gcenx's binary distribution of Apple's Game Porting Toolkit: Wine 7.7 +

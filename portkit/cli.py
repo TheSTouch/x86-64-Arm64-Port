@@ -6,7 +6,7 @@ import subprocess
 import sys
 from datetime import datetime
 
-from . import bench, config, decomp, games, pdb, inspect, kettle, runtime, session, steam, trace, wine
+from . import bench, config, decomp, games, pdb, inspect, kettle, overlay, runtime, session, steam, trace, wine
 from .util import Fail, free_gb, step, sysctl
 
 
@@ -192,9 +192,24 @@ def cmd_decomp(a):
     return 0
 
 
+def cmd_overlay(a):
+    g = games.load(a.game)
+    if not g.root or not g.root.is_dir():
+        raise Fail(f"{g.name} is not installed (games/{g.id}.toml)")
+    replaced = overlay.build(g.root, a.dir, a.dll or [])
+    for rel, src in replaced.items():
+        print(f"  {rel}  <-  {src}")
+    print(f"Overlay of {g.root} in {a.dir}: {len(replaced)} file(s) replaced, everything else linked")
+    print(f"Start it with: ./port run {g.id} --overlay {a.dir} --kettle")
+    return 0
+
+
 def cmd_run(a):
     g = _game(a)
     session.ready(g)
+    if a.overlay:
+        overlay.use(g, a.overlay)
+        step(f"Running from the overlay {g.overlay}")
     env = {"MTL_HUD_ENABLED": "1"} if a.hud else {}
     env.update(_env_pairs(a.env))
     log = session.report_dir(g, "run") / "wine.log"
@@ -280,7 +295,15 @@ def parser():
     sp = game_cmd("run", "play a game under the Porting Kit")
     sp.add_argument("--hud", action="store_true", help="show the Metal performance HUD")
     sp.add_argument("--keep-steam", action="store_true", help="use the running Steam (its environment applies)")
+    sp.add_argument("--overlay", metavar="DIR", help="start the game from an overlay folder (./port overlay); needs --kettle")
     sp.set_defaults(fn=cmd_run)
+
+    sp = sub.add_parser("overlay", help="an overlay game folder: the install linked, some DLLs replaced (never writes to the game)")
+    sp.add_argument("game")
+    sp.add_argument("dir", help="the overlay folder, beside the game and outside this repository")
+    sp.add_argument("--dll", action="append", metavar="FILE",
+                    help="a built file replacing the game's file of the same name (its .pdb too), repeatable")
+    sp.set_defaults(fn=cmd_overlay)
 
     sp = game_cmd("bench", "benchmark a scene: memory, CPU, swap and an Instruments trace")
     sp.add_argument("--duration", type=int, default=120, help="seconds recorded (default: %(default)s)")

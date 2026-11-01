@@ -127,21 +127,13 @@ def _is_game_source(path):
     return "\\source\\" in p and not any(x in p for x in ("\\engine\\", "\\intermediate\\", "\\thirdparty\\"))
 
 
-def _inside_repository(path):
-    try:
-        Path(path).resolve().relative_to(config.ROOT)
-        return True
-    except ValueError:
-        return False
-
-
 def _safe(name):
     return re.sub(r"[^A-Za-z0-9_.-]+", "_", name.replace("::", "__")).strip("_")[:120] or "anonymous"
 
 
 def dump(dll, out, source_marker=None):
     """One folder per module, holding functions.tsv and one .asm per game function, by source file."""
-    if _inside_repository(out):
+    if config.inside_repository(out):
         raise Fail(f"{out} is inside this repository; game-derived material stays outside it")
     m = Module(dll)
     module = re.sub(r"-Win64-(Shipping|Test|Development)$", "", Path(dll).stem)
