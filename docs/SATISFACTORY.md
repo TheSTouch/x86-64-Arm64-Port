@@ -76,10 +76,11 @@ and `"moltenvk"` in the runtime). The bundled library stays next to it as
 
 With 1.4.2 the layer shows both RVT physical textures created, and the menu map loads (31 s).
 `-dpcvars=r.VT.RVT.DirectCompress=0` is gone from the game file: the shipping build ignores it.
-`r.VT.RVT.DirectCompress=0` is still needed, though, now through `-ini:` (A-3 below): with the
-direct path, which writes the blocks through MoltenVK's aliased views, the menu's first frames hang
-("GameThread timed out waiting for RenderThread after 120 seconds", then "Application Hang
-Detected").
+`r.VT.RVT.DirectCompress=0` is kept, through `-ini:` (A-3 below), as the cautious choice: the one
+run with the direct path (which writes the blocks through MoltenVK's aliased views) hung in the
+menu's first frames ("GameThread timed out waiting for RenderThread after 120 seconds", then
+"Application Hang Detected"). That does not prove the direct path is at fault: a later run with it
+off lost the device to a GPU timeout during start-up (see "GPU timeouts" below).
 
 ## Failing pipelines (A-3)
 
@@ -123,3 +124,29 @@ geometry shader never runs. The same lines under `[SystemSettings]` in the prefi
 `Engine.ini` work too (the game keeps that section), but the command line keeps everything in the
 game file. With both, the game reaches the main menu on MoltenVK 1.4.2, and the only failing
 pipelines left are XeSS's.
+
+## The pink screen (A-4)
+
+Pink, for this page, is the share of strongly magenta pixels in captures of the game's window,
+taken every two seconds (`screencapture -l <window>` works while the window is behind others).
+
+- **At start-up it is the game window before its first frame.** In the run that reached the menu
+  at 18:28 (MoltenVK 1.4.2, the A-3 settings), the splash window came first, then the game window
+  was entirely magenta for about 25 seconds: from the Vulkan device's creation (18:27:20) until
+  Unreal drew its loading screen (18:28:00). Every capture after that had no magenta. It is the
+  content of a Wine window whose Metal layer has not been presented to yet, not something the game
+  draws. A-3's fixes do not change it, and it does no harm.
+- **Once, in the menu**: one run (17:33, cached shadows off through `Engine.ini`) showed blocky
+  magenta areas in the 3D scene behind the menu, 10 % of the window. Later runs with the same
+  settings through `-ini:` showed none; the 3D scene was black with scattered coloured specks
+  instead. That, not the start-up pink, is the rendering problem to chase next, with an Xcode GPU
+  frame capture of the menu.
+- **XeSS is not involved**: its 16 pipelines fail in every run, with and without magenta.
+
+## GPU timeouts
+
+Two of seven runs on MoltenVK 1.4.2 stopped on the GPU, at different moments: once at the menu's
+second frame (render thread waiting 120 s, with `DirectCompress` on), once during start-up
+(MoltenVK: "Lost VkDevice after MTLCommandBuffer … execution failed: Caused GPU Timeout Error";
+Unreal: `TerminateOnGPUCrash`, with `DirectCompress` off). A run that stops this way can simply be
+started again; finding the command buffer needs a capture of a failing run.

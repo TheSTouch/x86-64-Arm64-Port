@@ -15,8 +15,8 @@ launch = "steam"
 # DirectX 11 needs DXMT, which stock Wine 11 cannot load yet.
 # Console variables go in -ini:Engine:[SystemSettings]:... (the shipping build
 # applies it; it ignores -dpcvars):
-# - r.VT.RVT.DirectCompress=0: with MoltenVK's aliased uncompressed views the
-#   direct path hangs the GPU in the menu's first frames;
+# - r.VT.RVT.DirectCompress=0: the one run with the direct path (writing BC
+#   blocks through MoltenVK's aliased views) hung; kept off to be safe;
 # - r.Shadow.CacheWholeSceneShadows=0: the cached point-light shadow copy uses
 #   a geometry shader, which Metal does not have (the pipeline fails and the
 #   game quits).
