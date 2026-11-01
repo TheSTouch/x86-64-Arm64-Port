@@ -81,6 +81,35 @@ class InspectTest(unittest.TestCase):
         p = self.put("Old-Win64-Shipping.exe", build_pe(b"++UE4+Release-4.27\0"))
         self.assertEqual(inspect.unreal_version(p)["version"], "4.27")
 
+    # A-2: in a modular build the main executable is a stub; protection is judged on every file.
+    def test_protection_judged_on_every_code_file(self):
+        self.unreal_game()
+        r = inspect.inspect_folder(self.root)
+        self.assertEqual(r["code_protection"]["flagged"], [])
+        self.assertEqual(r["code_protection"]["files"], 9)
+        level, text = r["routes"]["recomp"][0]
+        self.assertEqual(level, "ok")
+        self.assertIn("all 9 code files", text)
+        self.assertIn("Protection  0 of 9 code files look packed", inspect.format_report(r))
+
+        self.put("Engine/Binaries/Win64/Game-Engine-Win64-Shipping.dll", build_pe(os.urandom(0x1000)))
+        r = inspect.inspect_folder(self.root)
+        self.assertEqual(r["code_protection"]["flagged"], ["Engine/Binaries/Win64/Game-Engine-Win64-Shipping.dll"])
+        self.assertEqual(r["routes"]["recomp"][0][0], "blocker")
+
+    def test_protected_third_party_file_is_a_risk_not_a_blocker(self):
+        self.unreal_game()
+        self.put("Engine/Binaries/ThirdParty/Vendor/vendor.dll", build_pe(os.urandom(0x1000)))
+        levels = [level for level, _ in inspect.inspect_folder(self.root)["routes"]["recomp"]]
+        self.assertNotIn("blocker", levels)
+        self.assertIn("risk", levels)
+
+    def test_unreal_toolchain_sections_are_not_flagged(self):
+        image = bytearray(build_pe(b"\xc3" * 0x100))
+        image[0x58 + 240:0x58 + 248] = b".uedbg\0\0"
+        flags = inspect.inspect_file(self.put("a.dll", bytes(image)))["sections"][0]["flags"]
+        self.assertEqual(flags, [])
+
 
 if __name__ == "__main__":
     unittest.main()

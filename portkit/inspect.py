@@ -45,7 +45,11 @@ GRAPHICS_DLLS = {
     "opengl32.dll": "OpenGL",
 }
 
-STANDARD_CODE_SECTIONS = {".text", ".textbss", "text", "code", ".init", "init", "page", ".itext"}
+# Unreal 5 modules carry a small .uedbg code section; Microsoft's own D3D12Core and XAudio2 redistributables
+# have .text_hf and .no_bbt. All have ordinary entropy.
+STANDARD_CODE_SECTIONS = {".text", ".textbss", "text", "code", ".init", "init", "page", ".itext",
+                          ".uedbg", ".text_hf", ".no_bbt"}
+PACKED_ENTROPY = 7.2  # machine code sits around 6 to 6.9; encrypted or compressed code near 8
 PE_SUFFIXES = {".exe", ".dll"}
 
 # Unreal's build version: "5.6.1-44394996+++UE5+Release-5.6" in stock builds, "5.6.1-++Studio+branch-CL-123"
@@ -89,7 +93,7 @@ def _section_report(binary):
         if not s.executable:
             continue
         flags = []
-        if s.entropy is not None and s.entropy > 7.2:
+        if s.entropy is not None and s.entropy > PACKED_ENTROPY:
             flags.append("encrypted or packed at rest")
         if s.name.lower() not in STANDARD_CODE_SECTIONS:
             flags.append("non-standard code section")
@@ -150,13 +154,24 @@ def inspect_folder(root, max_pe=600):
     main = games.guess_exe(root)
     pe_files = sorted((p for p in files if p.suffix.lower() in PE_SUFFIXES), key=lambda p: -p.stat().st_size)
     graphics, x86_32, parsed, code = {}, [], 0, 0
+    # In a modular build the main executable is a small stub: protection is judged on every code file.
+    protection = {"files": 0, "max_entropy": 0.0, "max_entropy_file": None, "flagged": [], "steamstub": []}
     for p in pe_files[:max_pe]:
         try:
-            b = pe.parse(p)
+            b = pe.parse(p, with_entropy=True)
         except (pe.NotPE, OSError, ValueError):
             continue
         parsed += 1
         code += b.code_size
+        rel = p.relative_to(root).as_posix()
+        if entropies := [s.entropy for s in b.sections if s.executable and s.entropy is not None]:
+            protection["files"] += 1
+            if max(entropies) > protection["max_entropy"]:
+                protection["max_entropy"], protection["max_entropy_file"] = max(entropies), rel
+            if max(entropies) > PACKED_ENTROPY:
+                protection["flagged"].append(rel)
+        if any(s.name == ".bind" for s in b.sections):
+            protection["steamstub"].append(rel)
         if b.machine == "x86":
             x86_32.append(p.name)
         for dll in b.imported_dlls():
@@ -176,6 +191,7 @@ def inspect_folder(root, max_pe=600):
         "pe_parsed": parsed,
         "code_mb": round(code / 2**20, 1),
         "x86_32_binaries": x86_32[:20],
+        "code_protection": protection,
         "main": inspect_file(main) if main else None,
     }
     if engine == "Unreal Engine" and report["main"] and not report["main"]["unreal_version"]:
@@ -209,14 +225,24 @@ def routes(r):
     if main:
         gptk.append(("info", "x86-64 code runs through Rosetta 2 (AVX advertised by default)"))
 
-    if main.get("protection"):
-        recomp.append(("blocker", "the main executable looks protected (see the hints above): static "
-                                  "recompilation needs the decrypted code, and removing the protection "
-                                  "is not something this project does"))
+    cp = r.get("code_protection")
+    target = _unreal_target(main.get("path"))
+    own = [f for f in (cp or {}).get("flagged", []) + (cp or {}).get("steamstub", [])
+           if target and Path(f).name.lower().startswith(target.lower() + "-")]
+    if main.get("protection") or own:
+        recomp.append(("blocker", "the game's own code looks protected ("
+                                  + (", ".join(own[:5]) if own else "main executable, see the hints above")
+                                  + "): static recompilation needs the decrypted code, and removing the "
+                                  "protection is not something this project does"))
+    elif cp and main:
+        recomp.append(("ok", f"code is plain in all {cp['files']} code files (highest code-section entropy "
+                             f"{cp['max_entropy']}, in {Path(cp['max_entropy_file'] or '-').name}); "
+                             f"{r['code_mb']} MB of x86 code across all .exe/.dll files"))
     elif main:
-        total = r.get("code_mb", main["code_mb"])
-        recomp.append(("ok", f"main executable code is plain; {total} MB of x86 code across all "
-                             ".exe/.dll files (third-party DLLs included)"))
+        recomp.append(("ok", f"main executable code is plain; {main['code_mb']} MB of x86 code"))
+    if cp and (other := [f for f in cp["flagged"] + cp["steamstub"] if f not in own]):
+        recomp.append(("risk", f"{len(other)} other file(s) look packed or wrapped ({', '.join(other[:5])}): "
+                               "they can only be replaced or dropped, not recompiled"))
     if r["engine"] == "Unreal Engine":
         recomp.append(("info", f"Unreal Engine {_unreal_label(main) or '(version unknown)'}: the engine "
                                "has a Mac target, so engine-level knowledge transfers"))
@@ -228,6 +254,12 @@ def routes(r):
     if comps & ANTI_CHEAT:
         recomp.append(("risk", "anti-cheat: online modes stay out of reach"))
     return {"porting_kit": gptk, "recomp": recomp}
+
+
+def _unreal_target(main_path):
+    """"FactoryGameSteam" from ".../FactoryGameSteam-Win64-Shipping.exe": the prefix of its module DLLs."""
+    hit = re.match(r"(.+)-Win64-(?:Shipping|Test|Development|DebugGame)\.exe$", Path(main_path or "").name, re.I)
+    return hit.group(1) if hit else None
 
 
 def _unreal_label(m):
@@ -254,6 +286,11 @@ def format_report(r):
             f"Code        {r['code_mb']} MB of machine code in {r['pe_parsed']} parsed .exe/.dll",
             f"Components  {', '.join(r['components']) or 'none recognised'}",
         ]
+        if cp := r.get("code_protection"):
+            found = cp["flagged"] + cp["steamstub"]
+            lines.append(f"Protection  {len(found)} of {cp['files']} code files look packed or wrapped"
+                         + (f": {', '.join(found[:5])}" if found else
+                            f" (highest code-section entropy {cp['max_entropy']})"))
         if r["x86_32_binaries"]:
             lines.append(f"32-bit x86  {', '.join(r['x86_32_binaries'])}")
     m = r.get("main")
