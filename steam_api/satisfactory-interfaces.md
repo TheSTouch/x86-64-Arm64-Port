@@ -19,7 +19,7 @@ game's modules ask for interfaces with a user handle of 0 (they never import
 `SteamAPI_GetHSteamUser`). The Steam online backend asks `ISteamApps::BIsSubscribed`, gets false and
 gives up ("Steam User is NOT subscribed, exiting"; "Failed to initialize 'STEAM' online backend"),
 then the game goes on with its Epic backend. So this list stops where an unlicensed Steam stops the
-game; what it asks once Steam answers for real needs a run with the bridge. The game was stopped after five minutes (no call counts: it did not quit by itself).
+game; what it asks once Steam answers for real is in the last section, from a run with the bridge. The game was stopped after five minutes (no call counts: it did not quit by itself).
 
 ## Exports called
 
@@ -86,5 +86,128 @@ Counts are calls until the game quit (blank: the game did not quit cleanly).
 
 | Id | Struct |
 |---|---|
+| 1221 | `SteamNetConnectionStatusChangedCallback_t (game server)` |
+
+## With the bridge
+
+The same game on the bridge build (`./port run satisfactory --kettle`, here in a scratch prefix,
+2026-11-01, with the game file's arguments of commit A-3): `SteamAPI_Init` signs in through Kettle
+and Steam signs the ownership ticket, in the launcher and in the game. The game's log then says
+"Steam User is subscribed 1", "[AppId: 526870] Client API initialized 1", "Initialized 'STEAM'
+online backend", and its Epic login reports the Steam account ("[FAuthEOSGS::Login] Successfully
+logged in as [Steam:1 (...)]"; no Steam ticket was asked of the DLL for it). The run was stopped
+after five minutes (no call counts). Methods marked stub in `steam_api.log` answer "nothing":
+stats (`RequestCurrentStats` fails, the game warns and goes on), Steam Input, networking.
+
+### Exports called
+
+- `SteamAPI_Init`
+- `SteamInternal_ContextInit`
+- `SteamInternal_FindOrCreateUserInterface`
+- `SteamGameServer_GetHSteamUser`
+- `SteamInternal_FindOrCreateGameServerInterface`
+- `SteamAPI_GetHSteamUser`
+- `SteamAPI_RestartAppIfNecessary`
+- `SteamAPI_RunCallbacks`
+
+### Interfaces handed out
+
+| Version | Asked through |
+|---|---|
+| `SteamUtils010` | FindOrCreateUserInterface |
+| `SteamNetworkingUtils004` | FindOrCreateUserInterface |
+| `SteamNetworkingSockets012` | FindOrCreateUserInterface |
+| `SteamUser023` | FindOrCreateUserInterface |
+| `SteamFriends017` | FindOrCreateUserInterface |
+| `STEAMREMOTESTORAGE_INTERFACE_VERSION016` | FindOrCreateUserInterface |
+| `STEAMUSERSTATS_INTERFACE_VERSION012` | FindOrCreateUserInterface |
+| `SteamMatchMakingServers002` | FindOrCreateUserInterface |
+| `STEAMAPPS_INTERFACE_VERSION008` | FindOrCreateUserInterface |
+| `SteamNetworking006` | FindOrCreateUserInterface |
+| `SteamMatchMaking009` | FindOrCreateUserInterface |
+| `SteamInput006` | FindOrCreateUserInterface |
+
+Asked for and not handed out:
+
+- `SteamNetworkingSockets012` (FindOrCreateGameServerInterface, user 0): no game server
+
+### Methods called
+
+Counts are calls until the game quit (blank: the game did not quit cleanly).
+
+#### ISteamApps (`STEAMAPPS_INTERFACE_VERSION008`)
+
+| Slot | Method | Calls |
+|---|---|---|
+| 0 | `BIsSubscribed` |  |
+| 10 | `GetDLCCount` |  |
+| 11 | `BGetDLCDataByIndex` |  |
+| 15 | `GetCurrentBetaName` |  |
+
+#### ISteamFriends (`SteamFriends017`)
+
+| Slot | Method | Calls |
+|---|---|---|
+| 0 | `GetPersonaName` |  |
+| 3 | `GetFriendCount` |  |
+| 44 | `ClearRichPresence` |  |
+
+#### ISteamInput (`SteamInput006`)
+
+| Slot | Method | Calls |
+|---|---|---|
+| 0 | `Init` |  |
+
+#### ISteamNetworkingSockets (`SteamNetworkingSockets012`)
+
+| Slot | Method | Calls |
+|---|---|---|
+| 22 | `InitAuthentication` |  |
+
+#### ISteamNetworkingUtils (`SteamNetworkingUtils004`)
+
+| Slot | Method | Calls |
+|---|---|---|
+| 7 | `CheckPingDataUpToDate` |  |
+| 13 | `SetDebugOutputFunction` |  |
+
+#### ISteamUser (`SteamUser023`)
+
+| Slot | Method | Calls |
+|---|---|---|
+| 1 | `BLoggedOn` |  |
+| 2 | `GetSteamID` |  |
+
+#### ISteamUserStats (`STEAMUSERSTATS_INTERFACE_VERSION012`)
+
+| Slot | Method | Calls |
+|---|---|---|
+| 0 | `RequestCurrentStats` |  |
+
+#### ISteamUtils (`SteamUtils010`)
+
+| Slot | Method | Calls |
+|---|---|---|
+| 9 | `GetAppID` |  |
+| 16 | `SetWarningMessageHook` |  |
+| 34 | `IsSteamRunningOnSteamDeck` |  |
+| 36 | `SetGameLauncherMode` |  |
+
+### Callbacks registered
+
+| Id | Struct |
+|---|---|
+| 101 | `SteamServersConnected_t` |
+| 103 | `SteamServersDisconnected_t` |
+| 168 | `GetTicketForWebApiResponse_t` |
+| 304 | `PersonaStateChange_t` |
+| 333 | `GameLobbyJoinRequested_t` |
+| 337 | `GameRichPresenceJoinRequested_t` |
+| 503 | `LobbyInvite_t` |
+| 505 | `LobbyDataUpdate_t` |
+| 506 | `LobbyChatUpdate_t` |
+| 1101 | `UserStatsReceived_t` |
+| 1102 | `UserStatsStored_t` |
+| 1103 | `UserAchievementStored_t` |
 | 1221 | `SteamNetConnectionStatusChangedCallback_t (game server)` |
 

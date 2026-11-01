@@ -96,6 +96,17 @@ def cmd_steam(a):
         expires = datetime.fromtimestamp(info["expires"]).strftime("%Y-%m-%d") if info["expires"] else "?"
         print(f"Signed in to Steam as SteamID {info['steamid']} (Keychain \"{kettle.KEYCHAIN_SERVICE}\", "
               f"until {expires})")
+    elif a.action == "check":
+        if not a.args:
+            raise Fail("usage: ./port steam check <game>")
+        g = games.load(a.args[0])
+        session.ready(g)
+        out = session.report_dir(g, "steam-check")
+        code, text = kettle.check(g, out)
+        print(text, end="")
+        if code:
+            raise Fail(f"the bridge did not pass: {out / 'steam_api.log'} and {out / 'wine.log'}")
+        step(f"Signed in and licensed for {g.name}, through our steam_api64.dll under Wine")
     elif a.action == "inventory":
         if not a.args:
             raise Fail("usage: ./port steam inventory <game>")
@@ -200,9 +211,10 @@ def parser():
     sp.set_defaults(fn=cmd_setup)
 
     sp = prefixed(sub.add_parser("steam", help="Windows Steam in the prefix"))
-    sp.add_argument("action", choices=["install", "start", "stop", "library", "signin", "status", "inventory"])
+    sp.add_argument("action", choices=["install", "start", "stop", "library", "signin", "status", "check", "inventory"])
     sp.add_argument("args", nargs="*", help="library: the library folder; start: extra Steam arguments; "
                     "signin: an account name (else a QR code), for the Kettle launch mode; "
+                    "check: a game, its sign-in and license through our steam_api64.dll; "
                     "inventory: a game, run with a logging steam_api64.dll and no Steam")
     sp.set_defaults(fn=cmd_steam)
 

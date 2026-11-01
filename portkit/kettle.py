@@ -283,3 +283,78 @@ def stored_token(environ=None, security=None):
     info = token_info(token)
     return token if info and info["client"] else None
 
+
+# --- the bridge ----------------------------------------------------------------------------------
+
+RECOMPSTEAM = SOURCE / "recompsteam"
+
+
+def build_unixlib(name="bridge"):
+    """steam_api/unix/bridge.m, Kettle's core and RecompSteam's Steamworks files, as the x86-64
+    Mach-O library Wine loads beside the DLL: x86_64-unix/steam_api64.so. x86-64 because the whole
+    Wine process runs under Rosetta."""
+    sources = [SOURCE / "unix/bridge.m", *(RECOMPSTEAM / f for f in
+               ("RecompSteamFlat.m", "RecompSteamApps.m", "RecompSteamUser.m")), *kettle_sources()]
+    target = build_root(name) / "x86_64-unix" / DLL.replace(".dll", ".so")
+    if not _stale(target, [*sources, SOURCE / "bridge.h", RECOMPSTEAM / "RecompSteamFlat.h"]):
+        return target
+    step("Building the Mac side of steam_api64 (Kettle, x86-64)")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    run(["xcrun", "clang", "-arch", "x86_64", "-dynamiclib", "-fobjc-arc", "-fmodules", "-O1", "-g", "-Wall",
+         "-Wno-unused-function", "-mmacosx-version-min=12.0", *kettle_flags("SIGN_IN", "TICKETS"),
+         "-I", SOURCE, "-I", RECOMPSTEAM, "-framework", "Foundation", "-framework", "Security", "-lz",
+         "-o", target, *sources])
+    run(["codesign", "-s", "-", "-f", target], capture_output=True)
+    return target
+
+
+def build_bridge():
+    """Both halves of the bridge into runtime/steam-api/bridge; returns that WINEDLLPATH entry."""
+    build_dll("bridge", extra_sources=[SOURCE / "pe/bridge.c"])
+    build_unixlib("bridge")
+    return build_root("bridge")
+
+
+CHECK_EXE = BUILD_DIR / "steam-check.exe"
+
+
+def build_check():
+    source = SOURCE / "check/steam-check.c"
+    if not _stale(CHECK_EXE, [source, SOURCE / "pe/slots.h"]):
+        return CHECK_EXE
+    cc = steam.zig_cc()
+    step("Building steam-check.exe")
+    CHECK_EXE.parent.mkdir(parents=True, exist_ok=True)
+    run([*cc, "-O2", "-s", "-Wall", "-o", CHECK_EXE, source], cwd=CHECK_EXE.parent)
+    for leftover in CHECK_EXE.parent.glob("steam-check.pdb"):
+        leftover.unlink()
+    return CHECK_EXE
+
+
+def check(game, out, prefix_env=None):
+    """Run steam-check.exe with the bridge, as `game` would load it: sign-in and license, no game.
+    Returns (exit code, its output)."""
+    import subprocess
+
+    root = build_bridge()
+    exe = build_check()
+    log = out / "steam_api.log"
+    env = wine.env(game.prefix, extra={**environment(game, root, log), "PORTKIT_STEAM_NO_DIALOG": "1",
+                                       **(prefix_env or {})})
+    r = subprocess.run([str(runtime_wine(game)), str(exe), *([wine.windows_path(valve_dll(game))] if valve_dll(game) else [])],
+                       env=env, capture_output=True, text=True, timeout=180)
+    (out / "wine.log").write_text(r.stderr)
+    return r.returncode, r.stdout
+
+
+def valve_dll(game):
+    """The game's own steam_api64.dll, which Wine's load order swaps for ours."""
+    if not game.root or not game.root.is_dir():
+        return None
+    found = sorted(game.root.rglob(DLL), key=lambda p: len(p.parts))
+    return found[0] if found else None
+
+
+def runtime_wine(game):
+    from . import runtime
+    return runtime.wine_bin(game.prefix)
