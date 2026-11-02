@@ -7,7 +7,7 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-from . import bench, cdo, config, decomp, games, hooks, msvc, pdb, inspect, kettle, overlay, runtime, session, steam, trace, wine
+from . import bench, cdo, config, decomp, games, hooks, msvc, pdb, permute, inspect, kettle, overlay, runtime, session, steam, trace, wine
 from .util import Fail, free_gb, step, sysctl
 
 
@@ -396,6 +396,15 @@ def cmd_cdo(a):
     return 0
 
 
+def cmd_permute(a):
+    run, beside = permute.permute(a.project, a.file, a.function, tries=a.tries, minutes=a.minutes, seed=a.seed,
+                                  log=lambda m: print(m, flush=True))
+    best = run.best[0]
+    print(f"{run.function}: score {run.start} -> {best.score} in {run.tries} candidates compiled ({run.failed} did not "
+          f"compile)" + ("; no new rewrite left" if run.exhausted else "") + f"; best candidates in {beside}")
+    return 0 if best.score == 0 else 1
+
+
 def parser():
     p = argparse.ArgumentParser(prog="port", description="Windows games on Apple Silicon: Porting Kit "
                                 "(Game Porting Toolkit) now, native recompilation where a game has one.")
@@ -537,6 +546,16 @@ def parser():
     sp.add_argument("tsv", help="RecompCDO.tsv")
     sp.add_argument("--class", dest="cls", required=True, metavar="NAME", help="the class, with its prefix (UFGMenuBase)")
     sp.set_defaults(fn=cmd_cdo)
+
+    sp = sub.add_parser("permute", help="small rewrites of a recovered function, each compiled on the Mac and scored "
+                        "against the shipped one; the best written beside the staged file")
+    sp.add_argument("project", help="a staged project (Project/stage.sh <dir>), never the recovered-code repository")
+    sp.add_argument("file", help="the recovered file (FGFoo.cpp)")
+    sp.add_argument("function", help="the function, Scope::Name as its PDB names it")
+    sp.add_argument("--tries", type=int, default=100, help="at most this many candidates (default: %(default)s)")
+    sp.add_argument("--minutes", type=float, default=60, help="at most this long (default: %(default)s)")
+    sp.add_argument("--seed", type=int, help="for a run that can be repeated")
+    sp.set_defaults(fn=cmd_permute)
     return p
 
 

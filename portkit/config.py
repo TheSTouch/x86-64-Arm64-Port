@@ -103,6 +103,8 @@ MSVC_PREFIX = Path(_setting("MSVC_PREFIX", MSVC_DIR / "prefix"))
 # its PC path under pc/<drive>/; work/ holds the rewritten response files of the compiles.
 MSVC_MIRROR = Path(_setting("MSVC_MIRROR", SMART / "msvc-mirror"))
 MSVC_BUILDS = Path(_setting("MSVC_BUILDS", SMART / "satisfactory-builds" / "mac"))
+# The recovered-code repository: tools read it, never write into it (`permute` works on a staged copy).
+RECOVERED_REPO = Path(_setting("RECOVERED_REPO", SMART / "satisfactory-recomp"))
 # The engine on the Mac: a clone of the tag the PC's engine was installed from.
 ENGINE_DIR = Path(_setting("ENGINE_DIR", SMART / "custom-repos" / "UnrealEngine-CSS"))
 # The shipped modules matched against, each with its PDB.
