@@ -5,7 +5,6 @@ A prefix is named after the runtime it belongs to (see runtime.py).
 
 import os
 import re
-import resource
 import subprocess
 import time
 
@@ -24,6 +23,8 @@ DEFAULT_ENV = {
 
 
 def _raise_fd_limit():
+    import resource  # Unix only: the decomp tools also run on the Windows PC, which never starts Wine
+
     soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
     try:
         cap = int(subprocess.run(["sysctl", "-n", "kern.maxfilesperproc"],

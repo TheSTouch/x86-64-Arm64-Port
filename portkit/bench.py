@@ -26,7 +26,7 @@ def _swap_used_mb():
     return float(m.group(1)) * (1024 if m.group(2) == "G" else 1)
 
 
-_libproc = ctypes.CDLL("/usr/lib/libproc.dylib", use_errno=True)
+_libproc = None  # macOS only, loaded on first use: the decomp tools also run on the Windows PC
 _RUSAGE_INFO_V2 = 2
 
 
@@ -37,6 +37,8 @@ def footprint_mb(pid):
     and Rosetta it can be a tenth of the real figure.
     """
     buf = ctypes.create_string_buffer(16 + 8 * 32)  # rusage_info_v2, with room to spare
+    global _libproc
+    _libproc = _libproc or ctypes.CDLL("/usr/lib/libproc.dylib", use_errno=True)
     if _libproc.proc_pid_rusage(int(pid), _RUSAGE_INFO_V2, buf) != 0:
         return None
     # After the 16-byte UUID: user/system time, idle and interrupt wakeups,
