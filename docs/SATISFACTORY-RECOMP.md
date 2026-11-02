@@ -215,6 +215,32 @@ engine tag, `5.6.1-css-83`.
   running. The Mac overlays (`/Volumes/SMART/TheSTouch/satisfactory-overlay`, `-recomp`) are ready for the
   same check under the Porting Kit.
 
+### Step 2: the hook loader (2026-11-02)
+
+FactoryGame.dll (15 MB) cannot be swapped whole, so its functions are replaced one at a time, in the shipped game:
+
+- **Compiling recovered FactoryGame code.** The build project holds FactoryGame as a headers-only module (`Headers.zip`,
+  with Coffee Stain's UHT plugin and a declarations-only Wwise stub whose sizes come from the PDB), so UHT runs on its
+  978 headers and nothing compiles FactoryGame itself. The recovered functions compile in a module of their own,
+  `FactoryGameRecomp`, with FactoryGame's definitions. In a matching build `FACTORYGAME_API` is empty, as inside
+  FactoryGame, and the objects match the shipped functions byte for byte (`./port decomp --match`).
+- **The hook DLL** ([windows/recomp-hooks](../windows/recomp-hooks)). The same sources built with `RECOMP_HOOKS=1`:
+  `FACTORYGAME_API` becomes dllimport, so what the recovered code takes from FactoryGame and the game's plugins goes
+  through `__imp_` pointers. `./port hooks` reads the compiled objects and the PDBs and writes the tables object the
+  DLL links: one slot per such symbol (module and RVA), one hook per recovered function (RVA, length, first bytes).
+  Engine modules link through their import libraries; those not yet loaded when the hook DLL loads are delay-loaded.
+- **Loading.** `FactoryPreEarlyLoadingScreen`, the first game module to load, loads the hook DLL (`RecompHooksClient.h`,
+  one macro on a line that had only a brace, so its matches stay). The DLL registers for DLL load notifications; as
+  each module of its tables is mapped, before its own code runs, it fills that module's slots, and for FactoryGame it
+  checks each hooked function's first bytes and writes a jump to ours. `Recomp.log`, next to the game's log, lists it.
+- **Proof (2026-11-02).** `UFGVersionFunctionLibrary::GetVersionString`, recovered and matched, hooked over the shipped
+  one: the main menu reads "Version: 1.2.4.1 CL#513885 (recomp)", the mark the hook build adds after the literal.
+- **Trace mode.** Tables made with `--trace` also list every FactoryGame function; the loader puts an int3 on each
+  entry, and the first execution of each traps once, is written to `RecompTrace.tsv` and runs on. It replaces guessing
+  which functions the menus use.
+- **Running it while away.** `windows/watcher.ps1`, started by the owner in their own session, runs the desktop
+  launchers on request from ssh (which cannot show windows), takes screenshots, clicks and types.
+
 ## First milestone: the early loading screen, native
 
 `FactoryPreEarlyLoadingScreen` is the smallest game module and runs first: three source files with

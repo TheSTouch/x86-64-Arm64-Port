@@ -6,13 +6,15 @@
 # Real folders only on the way to each replaced file; every other folder is a directory junction and every
 # other file a hard link to the game's (same volume), so nothing is copied and the game folder is never
 # written to. A .pdb next to a built DLL replaces the shipped one; otherwise the shipped .pdb is left out.
+# -Add puts files the game does not ship (a hook DLL) next to the first replaced one, with their .pdb.
 # A rebuild deletes only what a previous run made (the marker file says so); junctions are removed, never
 # followed.
 
 param(
     [Parameter(Mandatory)] [string] $Game,
     [Parameter(Mandatory)] [string] $Out,
-    [string[]] $Dll = @()
+    [string[]] $Dll = @(),
+    [string[]] $Add = @()
 )
 $ErrorActionPreference = 'Stop'
 $Marker = '.portkit-overlay.json'
@@ -32,6 +34,12 @@ foreach ($d in $Dll) {
     if ($found.Count -eq 0) { throw "${name}: the game ships no such file, so there is nothing to replace" }
     if ($found.Count -gt 1) { throw "$name is in several places in the game: $($found.FullName -join ', ')" }
     $replaced[$found[0].FullName.Substring($Game.Length + 1)] = $src
+}
+
+if ($Add.Count -and -not $replaced.Count) { throw "-Add needs a -Dll: the added files go next to the first replaced one" }
+foreach ($a in $Add) {
+    $name = Split-Path $a -Leaf
+    if (@(Get-ChildItem $Game -Recurse -File -Filter $name).Count) { throw "${name}: the game ships it, use -Dll" }
 }
 
 function Remove-Overlay([string] $folder) {
@@ -81,6 +89,17 @@ foreach ($rel in $replaced.Keys) {
     }
 }
 
-@{ game = $Game; replaced = $replaced } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $Out $Marker) -Encoding UTF8
+$added = @()
+foreach ($a in $Add) {
+    $src = (Resolve-Path $a).Path
+    $folder = Join-Path $Out (Split-Path @($replaced.Keys)[0] -Parent)
+    foreach ($f in @($src, [IO.Path]::ChangeExtension($src, '.pdb'))) {
+        if (Test-Path -LiteralPath $f) { Copy-Item -LiteralPath $f -Destination $folder }
+    }
+    $added += Join-Path (Split-Path @($replaced.Keys)[0] -Parent) (Split-Path $src -Leaf)
+}
+
+@{ game = $Game; replaced = $replaced; added = $added } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $Out $Marker) -Encoding UTF8
 "Overlay of $Game in ${Out}: $($replaced.Count) file(s) replaced, everything else linked"
 foreach ($rel in $replaced.Keys) { "  $rel  <-  $($replaced[$rel])" }
+foreach ($rel in $added) { "  $rel  (added)" }

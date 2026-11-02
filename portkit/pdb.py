@@ -148,6 +148,19 @@ def publics(path):
         return out
 
 
+def public_symbols(path):
+    """Every public symbol (S_PUB32) as (decorated name, segment, offset, flags), in the stream's order.
+    flags: 1 code, 2 function. Unlike `publics`, names sharing an address (folded functions) all stay."""
+    with MSF(path) as m:
+        _, symrec, _ = _dbi(m)
+        out = []
+        for _, kind, body in _records(m.read(symrec)):
+            if kind == S_PUB32 and len(body) >= 10:
+                flags, off, seg = struct.unpack_from("<IIH", body)
+                out.append((_cstr(body, 10), seg, off, flags))
+        return out
+
+
 def _lines(c13, names):
     """{(segment, offset): (source file, first line, last line)} from a module's C13 line info."""
     files, spans = {}, []

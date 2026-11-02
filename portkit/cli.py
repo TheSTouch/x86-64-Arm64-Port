@@ -5,8 +5,9 @@ import shutil
 import subprocess
 import sys
 from datetime import datetime
+from pathlib import Path
 
-from . import bench, config, decomp, games, pdb, inspect, kettle, overlay, runtime, session, steam, trace, wine
+from . import bench, config, decomp, games, hooks, pdb, inspect, kettle, overlay, runtime, session, steam, trace, wine
 from .util import Fail, free_gb, step, sysctl
 
 
@@ -201,6 +202,25 @@ def cmd_decomp(a):
     return 0
 
 
+def cmd_hooks(a):
+    objdir = Path(a.objects)
+    objects = sorted(objdir.glob("*.obj"))
+    recovered = [objdir / (n if n.endswith(".obj") else n + ".obj") for n in a.recovered]
+    for r in recovered:
+        if not r.is_file():
+            raise Fail(f"{r} not found")
+    p = hooks.generate(a.dlls, objects, recovered, a.out, a.trace)
+    for h in p.hooks:
+        print(f"hook     {h.rva:#010x} {h.length:>6}  {h.name}")
+    for name, why in p.skipped:
+        print(f"skipped  {name}: {why}")
+    thunks = sum(s.thunk for s in p.slots)
+    print(f"{len(p.hooks)} hooks ({sum(h.length for h in p.hooks)} bytes), {len(p.slots) - thunks} import slots, "
+          f"{thunks} thunks, {len(p.left)} symbols left to the linker" + (", trace table" if a.trace else "")
+          + f": {a.out}", file=sys.stderr)
+    return 0
+
+
 def cmd_overlay(a):
     g = games.load(a.game)
     if not g.root or not g.root.is_dir():
@@ -292,6 +312,17 @@ def parser():
     sp.add_argument("--match", metavar="OBJ", help="compare each function of a compiled .obj with the shipped one "
                     "(relocated operands masked): matched, or the first difference")
     sp.set_defaults(fn=cmd_decomp)
+
+    sp = sub.add_parser("hooks", help="the tables object a hook DLL links in (windows/recomp-hooks): hooks over the "
+                        "shipped functions, slots for what the recovered code takes from project modules")
+    sp.add_argument("dlls", nargs="+", metavar="DLL", help="the hooked module first, then the project modules its "
+                    "code references; each with its .pdb next to it")
+    sp.add_argument("--objects", required=True, metavar="DIR", help="the hook DLL's compiled objects")
+    sp.add_argument("--recovered", nargs="+", default=[], metavar="OBJ",
+                    help="the objects compiled from recovered sources, by name in DIR (Foo.cpp or Foo.cpp.obj)")
+    sp.add_argument("--out", required=True, metavar="FILE", help="the tables object to write (outside this repository)")
+    sp.add_argument("--trace", action="store_true", help="also list every function of the hooked module, for trace mode")
+    sp.set_defaults(fn=cmd_hooks)
 
     def game_cmd(name, help_):
         sp = sub.add_parser(name, help=help_)
