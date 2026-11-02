@@ -83,3 +83,35 @@ DXMT = {
 }
 
 STEAM_SETUP_URL = "https://cdn.akamai.steamstatic.com/client/installer/SteamSetup.exe"
+
+
+def _setting(name, default):
+    """A path setting: PORTKIT_<NAME> in the environment, else today's value on the owner's machines."""
+    return os.environ.get(f"PORTKIT_{name}", str(default))
+
+
+# The owner's large disk: toolchains, mirrors and builds, never in this repository.
+SMART = Path(_setting("SMART", "/Volumes/SMART/TheSTouch"))
+
+# MSVC on the Mac (portkit/msvc.py): the game's compiler and SDK, copied from the owner's Windows PC (the
+# same licence and bits), run under the default runtime's Wine with a prefix of its own.
+MSVC_VERSION = _setting("MSVC_VERSION", "14.38.33130")
+WINSDK_VERSION = _setting("WINSDK_VERSION", "10.0.22621.0")
+MSVC_DIR = Path(_setting("MSVC_DIR", SMART / "msvc"))            # MSVC/<version>/, sdk/Include, sdk/Lib
+MSVC_PREFIX = Path(_setting("MSVC_PREFIX", MSVC_DIR / "prefix"))
+# What exists only on the PC (UHT's generated headers, UBT's response files and definitions), each file at
+# its PC path under pc/<drive>/; work/ holds the rewritten response files of the compiles.
+MSVC_MIRROR = Path(_setting("MSVC_MIRROR", SMART / "msvc-mirror"))
+MSVC_BUILDS = Path(_setting("MSVC_BUILDS", SMART / "satisfactory-builds" / "mac"))
+# The engine on the Mac: a clone of the tag the PC's engine was installed from.
+ENGINE_DIR = Path(_setting("ENGINE_DIR", SMART / "custom-repos" / "UnrealEngine-CSS"))
+# The shipped modules matched against, each with its PDB.
+GAME_BINARIES = Path(_setting("GAME_BINARIES", "/Volumes/SMART/SteamLibraryWindows/steamapps/common/Satisfactory/"
+                                               "FactoryGame/Binaries/Win64"))
+# The Windows PC: its ssh host, and where things are there.
+PC_HOST = _setting("PC_HOST", "windows")
+PC_ENGINE = _setting("PC_ENGINE", "D:/UnrealEngine-CSS")
+PC_PROJECT = _setting("PC_PROJECT", "D:/SatisfactoryRecomp/Project")
+PC_MSVC = _setting("PC_MSVC", f"D:/Programs/Visual Studio/VC/Tools/MSVC/{MSVC_VERSION}")
+PC_WINSDK = _setting("PC_WINSDK", "C:/Program Files (x86)/Windows Kits/10")
+PC_TARGET = _setting("PC_TARGET", "FactoryGameSteam")

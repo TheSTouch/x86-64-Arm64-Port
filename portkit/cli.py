@@ -7,7 +7,7 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-from . import bench, config, decomp, games, hooks, pdb, inspect, kettle, overlay, runtime, session, steam, trace, wine
+from . import bench, config, decomp, games, hooks, msvc, pdb, inspect, kettle, overlay, runtime, session, steam, trace, wine
 from .util import Fail, free_gb, step, sysctl
 
 
@@ -292,6 +292,18 @@ def cmd_trace(a):
     return 0
 
 
+def cmd_msvc(a):
+    if a.action == "cl":
+        return msvc.cl(a.args).returncode
+    return 0
+
+
+def _msvc_args(a):
+    """The positional ARGs of `msvc`, by action."""
+    return cmd_msvc(a)
+
+
+
 def parser():
     p = argparse.ArgumentParser(prog="port", description="Windows games on Apple Silicon: Porting Kit "
                                 "(Game Porting Toolkit) now, native recompilation where a game has one.")
@@ -406,6 +418,13 @@ def parser():
     sp.add_argument("--sample-at", type=int, default=60, metavar="SECS", help="when to sample (default: %(default)s)")
     sp.add_argument("--timeout", type=int, default=900)
     sp.set_defaults(fn=cmd_trace)
+
+    sp = sub.add_parser("msvc", help="MSVC 14.38 under Wine: the PC's compiles replayed on the Mac, one unity "
+                        "blob compiled and matched without UBT")
+    sp.add_argument("action", choices=["cl"],
+                    help="cl: run cl.exe with ARGS")
+    sp.add_argument("args", nargs="*", metavar="ARG", help="cl: its arguments")
+    sp.set_defaults(fn=_msvc_args)
     return p
 
 
