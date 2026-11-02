@@ -218,7 +218,10 @@ def cmd_hooks(a):
     for r in recovered:
         if not r.is_file():
             raise Fail(f"{r} not found")
-    p = hooks.generate(a.dlls, objects, recovered, a.out, a.trace)
+    skip = set()
+    if a.skip:
+        skip = {line.split()[0] for line in Path(a.skip).read_text().splitlines() if line.strip() and not line.startswith("#")}
+    p = hooks.generate(a.dlls, objects, recovered, a.out, a.trace, skip)
     for h in p.hooks:
         print(f"hook     {h.rva:#010x} {h.length:>6}  {h.name}")
     for name, why in p.skipped:
@@ -333,6 +336,7 @@ def parser():
                     help="the objects compiled from recovered sources, by name in DIR (Foo.cpp or Foo.cpp.obj)")
     sp.add_argument("--out", required=True, metavar="FILE", help="the tables object to write (outside this repository)")
     sp.add_argument("--trace", action="store_true", help="also list every function of the hooked module, for trace mode")
+    sp.add_argument("--skip", metavar="FILE", help="decorated names not to hook, one per line (those that do not match)")
     sp.set_defaults(fn=cmd_hooks)
 
     def game_cmd(name, help_):

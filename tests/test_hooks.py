@@ -65,6 +65,13 @@ class PlanTest(unittest.TestCase):
         self.assertIn("header", skipped["?Inline@FGScreen@@QEAAHXZ"])
         self.assertIn("shorter than", skipped["?Tiny@@YAXXZ"])
 
+    def test_skipped_functions_are_not_hooked(self):
+        # a function that does not match may read fields at the wrong offsets (engine drift): not hooked
+        p = hooks.plan([coff.parse(obj(defined=[CONSTRUCT, "?Helper@@YAXXZ"]))], [], [GAME, PLUGIN],
+                       skip={"?Helper@@YAXXZ"})
+        self.assertEqual([h.name for h in p.hooks], [CONSTRUCT])
+        self.assertIn("skip list", dict(p.skipped)["?Helper@@YAXXZ"])
+
     def test_folded_functions_are_hooked_once(self):
         # identical code folded at one address: one jump there serves both
         p = self.plan([obj(defined=[CONSTRUCT, "?Folded@@YAXXZ"])])

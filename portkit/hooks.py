@@ -102,9 +102,10 @@ def _externals(objects):
     return defined, undefined
 
 
-def plan(recovered, others, modules):
+def plan(recovered, others, modules, skip=()):
     """recovered, others: parsed objects of the hook DLL (the recovered sources, the rest); modules: the hooked
-    module first, then the other project modules its code may reference."""
+    module first, then the other project modules its code may reference; skip: decorated names not to hook (those
+    that do not match: their code may use other field offsets than the shipped build's)."""
     p = Plan()
     defined, undefined = _externals(recovered + others)
     index = {}
@@ -133,7 +134,9 @@ def plan(recovered, others, modules):
                 continue
             seen.add(name)
             rva, length, source = game.functions[name]
-            if name.startswith(("??__E", "??__F")):
+            if name in skip:
+                p.skipped.append((name, "on the skip list (does not match the shipped function)"))
+            elif name.startswith(("??__E", "??__F")):
                 p.skipped.append((name, "a dynamic initializer or atexit: the file's statics in the hook DLL are its "
                                         "own copies, the game's would stay uninitialized"))
             elif not source.lower().endswith(".cpp"):
@@ -214,7 +217,7 @@ def emit(p, modules, trace=False):
     return w.build()
 
 
-def generate(dlls, objects, recovered, out, trace=False):
+def generate(dlls, objects, recovered, out, trace=False, skip=()):
     """dlls: the hooked module first, then the project modules; objects: every object of the hook DLL;
     recovered: those compiled from recovered sources. Writes the tables object; returns the plan."""
     if config.inside_repository(out):
@@ -228,7 +231,7 @@ def generate(dlls, objects, recovered, out, trace=False):
         except coff.NotCOFF as e:
             raise Fail(f"{o}: {e}")
         (parsed_rec if Path(o).resolve() in rec_set else parsed_other).append(parsed)
-    p = plan(parsed_rec, parsed_other, modules)
+    p = plan(parsed_rec, parsed_other, modules, skip)
     if p.errors:
         raise Fail("cannot link these references:\n  " + "\n  ".join(p.errors))
     Path(out).write_bytes(emit(p, modules, trace))
