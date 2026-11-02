@@ -175,7 +175,7 @@ of Coffee Stain's own) checks the overlay itself before any recovered code is in
 | Step | What you see | Needs |
 |---|---|---|
 | 0 | The shipped game on the Porting Kit, and `STATUS.md` in the recovered-code repository: functions written and matched, by module | done |
-| 1 | The game starts with **our** `FactoryPreEarlyLoadingScreen` DLL, built from recovered source for Win64, in place of Coffee Stain's. A `RECOMP_WATERMARK` build (off when matching) prints "recomp: N modules, M functions" on the loading screen | `5.6.1-CSS` built for Win64 (import libraries), MSVC 14.38.33130 (msvc-wine on the Mac, or the Windows PC), `./port run --overlay` |
+| 1 | The game starts with **our** `FactoryPreEarlyLoadingScreen` DLL, built from recovered source for Win64, in place of Coffee Stain's. A `RECOMP_WATERMARK` build (off when matching) prints "recomp: N modules, M functions" on the loading screen | done 2026-11-02, on the owner's Windows PC (`windows/overlay.ps1`): the menu reached with the watermark on the loading screen |
 | 2 | More of the game is ours each time: whole small modules swapped (FactoryMessagingTypes, then Coffee Stain's plugins), and inside FactoryGame, each recovered function hooked over the shipped one by a loader DLL. The watermark's counters grow; the game must keep playing | A hook loader (SML's approach), the matching harness |
 | 3 | The native milestone below: the Mac build of the engine draws the early loading screen from recovered code | Step 1's module, the engine built for macOS arm64 |
 | 4 | Native main menu, with the rest of FactoryGame still stubs | The menu's C++ classes recovered |
@@ -202,10 +202,13 @@ engine tag, `5.6.1-css-83`.
   Xcode 15.2 to 16.9; with Xcode 26.6 the local clone raises `MaxVersion` in `Apple_SDK.json` and turns off
   the new clang warnings 5.6 code trips (`AppleToolChain.cs`). The first target is `UnrealGame` for macOS
   arm64.
-- **For the owner.** Two overlays are ready: `/Volumes/SMART/TheSTouch/satisfactory-overlay` (the shipped DLL,
-  the baseline) and `/Volumes/SMART/TheSTouch/satisfactory-overlay-recomp` (ours, with the watermark). Start
-  each with `./port run satisfactory --overlay <folder> --kettle`; the second should show "recomp: 1 modules,
-  24 functions" on the early loading screen.
+- **Step 1 done (2026-11-02), on Windows.** A copy of the install on the PC (`D:\SatisfactoryRecomp\Game`,
+  without PDBs) and an overlay of it made by `windows/overlay.ps1` (junctions and hard links, a real
+  `FactoryGame\Binaries\Win64` holding our watermarked DLL). The shipped game ran from the overlay to the main
+  menu with "recomp: 1 modules, 24 functions" on the early loading screen; the log shows the overlay as its
+  base directory and no error. The game copy needs `steam_appid.txt` next to the shipping executable, and Steam
+  running. The Mac overlays (`/Volumes/SMART/TheSTouch/satisfactory-overlay`, `-recomp`) are ready for the
+  same check under the Porting Kit.
 
 ## First milestone: the early loading screen, native
 

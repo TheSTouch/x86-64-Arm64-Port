@@ -191,6 +191,7 @@ instead.
   - `kettle.py`: builds the Kettle bridge and runs games through it.
 - `games/`: one TOML file per game.
 - `wrapper/`: the Steam web helper wrapper (Windows C, built with Zig).
+- `windows/overlay.ps1`: the Windows counterpart of `./port overlay` (junctions and hard links), for running modules built from recovered source in a copy of the game on a Windows PC.
 - `steam_api/`: our `steam_api64.dll` and its Mac side, on Kettle (`vendor/kettle`, a submodule).
 - `layers/imagelog/`: a Vulkan layer and tools for what a game asks of the driver.
 - `docs/RECOMP.md`: how the native recompilation is planned.
