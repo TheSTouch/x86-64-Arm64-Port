@@ -174,6 +174,18 @@ def cmd_inspect(a):
 
 
 def cmd_decomp(a):
+    if a.families:
+        groups = decomp.families(a.dll, a.trace, a.source)
+        for i, g in enumerate(groups, 1):
+            print(f"family {i}: {g.kind}, {len(g.members)} functions, {g.bytes} bytes")
+            for rva, length, names, where in g.members:
+                folded = f" (+{len(names) - 1} folded at this address)" if len(names) > 1 else ""
+                print(f"  {rva:#010x} {length:>6}  {where}  {names[0]}{folded}")
+        big = [g for g in groups if len(g.members) >= 3]
+        print(f"{len(groups)} families of 2 or more: {sum(len(g.members) for g in groups)} functions, "
+              f"{sum(g.bytes for g in groups)} bytes; of 3 or more: {len(big)} families, "
+              f"{sum(len(g.members) for g in big)} functions, {sum(g.bytes for g in big)} bytes", file=sys.stderr)
+        return 0
     if a.trace:
         rows, files = decomp.trace(a.dll, a.trace)
         for r in rows:
@@ -330,6 +342,9 @@ def parser():
                     "the instructions not the same once both are aligned")
     sp.add_argument("--diff", action="append", metavar="NAME", help="with --match: this function's shipped and "
                     "compiled disassembly side by side (decorated or shipped name; may be repeated)")
+    sp.add_argument("--families", action="store_true", help="group the game's functions (with --trace, those the "
+                    "traces ran) whose code is the same once numbers are masked, or near it (lengths within 10 %%, "
+                    "instructions 90 %% the same)")
     sp.add_argument("--trace", nargs="+", metavar="TSV", help="name the functions of traces from the hook loader's "
                     "trace mode (RecompTrace.tsv; each function once), and sum them by source file: functions and "
                     "distinct source spans (template instances and copies of one inline counted once)")

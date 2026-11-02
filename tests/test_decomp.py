@@ -133,6 +133,46 @@ class DecompTest(unittest.TestCase):
         self.assertTrue((out / "Game-Screen" / "Screen.cpp" / "FGScreen__Construct.asm").is_file())
 
 
+class FamiliesTest(unittest.TestCase):
+    def test_shape_keeps_mnemonics_and_registers(self):
+        self.assertEqual(decomp._shape("mov\trax, qword ptr [rcx + 0x408]"), "mov rax, qword ptr [rcx + #]")
+        self.assertEqual(decomp._shape("mov\trax, qword ptr [rbp - 0x10]"), "mov rax, qword ptr [rbp + #]")
+        self.assertEqual(decomp._shape("call\t0x180bf8a50 <foo>"), "call #")
+        self.assertEqual(decomp._shape("lea\trdi, [rbx + 8*rax]"), "lea rdi, [rbx + 8*rax]")
+
+    def test_exact_and_near_groups(self):
+        body = [f"op{i % 7} r{i % 3}" for i in range(20)]
+        near = body[:10] + ["other"] + body[11:]                 # 19 of 20 the same
+        far = body[:14] + ["x"] * 6                               # 14 of 20
+        items = [(100, tuple(body)), (100, tuple(body)), (104, tuple(near)), (100, tuple(far)),
+                 (200, tuple(body)), (6, ("ret",)), (6, ("ret",))]
+        # 200 bytes: the same instructions, but outside 10 % of the others' length
+        groups = decomp._groups(items)
+        # 0, 1 and 4 the same; 2 near 0 and 1 (95 %, 4 % longer): one near family; 3 alone (70 %)
+        self.assertEqual(sorted((sorted(g), k) for g, k in groups), [([0, 1, 2, 4], "near"), ([5, 6], "exact")])
+        groups = decomp._groups(items[:4])
+        self.assertEqual([(sorted(g), k) for g, k in groups], [([0, 1, 2], "near")])
+        self.assertEqual(decomp._groups(items[:4], near=False), [([0, 1], "exact")])
+
+    @unittest.skipUnless(shutil.which("objdump"), "needs objdump (Xcode command line tools)")
+    def test_families_of_a_module(self):
+        with tempfile.TemporaryDirectory() as d:
+            dll = Path(d) / "Game-Screen-Win64-Shipping.dll"
+            data = bytearray(build_dll())
+            data[0x480:0x48e] = data[0x410:0x41e]                # TScreen<int>::Construct: the same code
+            data[0x482] ^= 0x40                                  # another displacement
+            dll.write_bytes(bytes(data))
+            dll.with_suffix(".pdb").write_bytes(build_pdb(twin=True))
+            (family,) = decomp.families(dll)
+            self.assertEqual(family.kind, "exact")
+            self.assertEqual([(names, where) for _, _, names, where in family.members],
+                             [(("FGScreen::Construct",), "Screen.cpp:20"), (("TScreen<int>::Construct",), "Screen.cpp:20")])
+            self.assertEqual(family.bytes, 0x80)
+            tsv = Path(d) / "t.tsv"
+            tsv.write_text("1\t1\t00001010\n")
+            self.assertEqual(decomp.families(dll, [tsv]), [])     # only one of them was run
+
+
 if __name__ == "__main__":
     unittest.main()
 
@@ -159,9 +199,9 @@ class TraceTest(unittest.TestCase):
             dll.with_suffix(".pdb").write_bytes(build_pdb(twin=True))
             a, b = Path(d) / "a.tsv", Path(d) / "b.tsv"
             a.write_text("5\t100\t00001010\n")
-            b.write_text("3\t100\t00001050\n7\t100\t00001010\n")   # two traces: 0x1010 counted once
+            b.write_text("3\t100\t00001080\n7\t100\t00001010\n")   # two traces: 0x1010 counted once
             rows, files = decomp.trace(dll, [a, b])
-            self.assertEqual([r.rva for r in rows], [0x1010, 0x1050])
+            self.assertEqual([r.rva for r in rows], [0x1010, 0x1080])
             self.assertEqual(rows[1].span, "D:\\Game\\Source\\Game\\Private\\Screen.cpp:20-27")
             # FGScreen::Construct and TScreen<int>::Construct come from the same lines: 2 functions, 1 span
-            self.assertEqual(files, [("Screen.cpp", 2, 0x60, 5, 1, 0x40)])
+            self.assertEqual(files, [("Screen.cpp", 2, 0x80, 5, 1, 0x40)])

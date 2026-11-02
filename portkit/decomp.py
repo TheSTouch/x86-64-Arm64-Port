@@ -7,11 +7,13 @@ the source line and the inlined calls. What `dump`
 writes is derived from the game, so it refuses to write inside this repository
 (docs/SATISFACTORY-RECOMP.md: recovered code stays on the owner's disks). `match`
 compares a compiled object file with the shipped module, and scores each function
-by its instructions that differ once both disassemblies are aligned.
+by its instructions that differ once both disassemblies are aligned. `families`
+groups functions whose code is the same once numbers are masked.
 """
 
 import difflib
 import os
+from collections import Counter
 import re
 import shutil
 import subprocess
@@ -340,6 +342,91 @@ def trace(dll, tsvs):
                 entry[3][key] = max(entry[3].get(key, 0), rows[-1].length)
     ordered = sorted(files.items(), key=lambda kv: kv[1][2])
     return rows, [(name, n, size, first, len(spans), sum(spans.values())) for name, (n, size, first, spans) in ordered]
+
+
+@dataclass
+class Family:
+    kind: str      # exact: the same code once numbers are masked; near: within 10 % in length, 90 % the same
+    members: list  # (rva, length, names, "File:line"): one piece of code each, every function folded there
+    bytes: int
+
+
+NEAR_LENGTH, NEAR_SAME, NEAR_MIN = 1.10, 0.90, 10  # near: lengths, instructions the same, fewest instructions
+
+
+def families(dll, tsvs=None, source_marker=None, near=True):
+    """The game's functions (or those the traces ran) grouped by their code: each instruction's mnemonic and
+    registers kept, every number (immediates, displacements, addresses, relocated operands) masked. Exact
+    groups share all of it; near groups join functions of at least 10 instructions whose lengths in bytes are
+    within 10 % and whose instructions are at least 90 % the same once aligned (compared only within that
+    length window). Groups of two or more, largest in bytes first."""
+    m = Module(dll)
+    fns = m.game_functions(source_marker)
+    if tsvs:
+        ran = set()
+        for tsv in [tsvs] if isinstance(tsvs, (str, Path)) else tsvs:
+            for line in Path(tsv).read_text(encoding="utf-8", errors="replace").splitlines():
+                parts = line.split("\t")
+                if not line.startswith("#") and len(parts) >= 3:
+                    ran.add(int(parts[2], 16))
+        fns = [f for f in fns if m.rva(f.segment, f.offset) in ran]
+    code = {}
+    for f in fns:
+        code.setdefault(m.rva(f.segment, f.offset), []).append(f)
+    rvas = sorted(code)
+    blobs = [m._bytes_at(rva, max(f.length for f in code[rva])) for rva in rvas]
+    items = [(len(blob), tuple(_shape(t) for _, _, t in rows)) for blob, rows in zip(blobs, _disassemble(blobs))]
+    out = []
+    for group, kind in _groups(items, near):
+        members = [(rvas[i], len(blobs[i]), tuple(f.name for f in code[rvas[i]]),
+                    f"{_base(code[rvas[i]][0].source)}:{code[rvas[i]][0].first_line}") for i in sorted(group)]
+        out.append(Family(kind, members, sum(m[1] for m in members)))
+    return sorted(out, key=lambda g: (-g.bytes, g.members[0][0]))
+
+
+def _shape(text):
+    """An instruction with its numbers masked: "mov rax, qword ptr [rcx + #]"."""
+    text = " ".join(re.sub(r"\s*<[^>]*>", "", text).partition(" # ")[0].split())
+    return re.sub(r"0x[0-9a-f]+", "#", re.sub(r" - 0x", " + 0x", text))
+
+
+def _groups(items, near=True):
+    """[(indices, "exact" or "near")] for items [(length in bytes, instruction shapes)]: groups of two or more."""
+    exact = {}
+    for i, (_, shape) in enumerate(items):
+        exact.setdefault(shape, []).append(i)
+    parent = {members[0]: members[0] for members in exact.values()}
+
+    def find(x):
+        while parent[x] != x:
+            parent[x] = x = parent[parent[x]]
+        return x
+
+    if near:
+        reps = sorted((items[r][0], r) for r in parent if len(items[r][1]) >= NEAR_MIN)
+        bags = {r: Counter(items[r][1]) for _, r in reps}
+        for a, (la, ra) in enumerate(reps):
+            for lb, rb in reps[a + 1:]:
+                if lb > la * NEAR_LENGTH:
+                    break
+                sa, sb = items[ra][1], items[rb][1]
+                need = NEAR_SAME * max(len(sa), len(sb))
+                if min(len(sa), len(sb)) < need or find(ra) == find(rb):
+                    continue
+                if sum((bags[ra] & bags[rb]).values()) < need:  # the instructions shared, in any order
+                    continue
+                same = difflib.SequenceMatcher(None, sa, sb, autojunk=False).get_matching_blocks()
+                if sum(block.size for block in same) >= need:
+                    parent[find(rb)] = find(ra)
+    joined = {}
+    for members in exact.values():
+        joined.setdefault(find(members[0]), []).append(members)
+    out = []
+    for parts in joined.values():
+        indices = [i for members in parts for i in members]
+        if len(indices) >= 2:
+            out.append((indices, "exact" if len(parts) == 1 else "near"))
+    return out
 
 
 @dataclass
