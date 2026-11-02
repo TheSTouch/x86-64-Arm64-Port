@@ -2,7 +2,8 @@
 
 The disassembly names what each instruction reaches: imported functions (through
 the import address table), the module's own functions (from the PDB) and string
-literals; between instructions, the source line and the inlined calls. What `dump`
+literals, and the members typed locals reach (`this->mFoo`); between instructions,
+the source line and the inlined calls. What `dump`
 writes is derived from the game, so it refuses to write inside this repository
 (docs/SATISFACTORY-RECOMP.md: recovered code stays on the owner's disks). `match`
 compares a compiled object file with the shipped module.
@@ -19,6 +20,12 @@ from .util import Fail
 
 ADDRESS = re.compile(r"0x([0-9a-f]{6,16})")
 LINE = re.compile(r"^\s*([0-9a-f]+):\s+(.*)$")
+MEMORY = re.compile(r"(?:(\w+) ptr )?\[(\w+)(?:\s*([+-])\s*(0x[0-9a-f]+|\d+))?\]")  # [reg], [reg + disp]: no index
+REGISTERS = {r: 328 + i for i, r in enumerate(("rax", "rbx", "rcx", "rdx", "rsi", "rdi", "rbp", "rsp",
+                                                "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15"))}
+ACCESS = {"byte": 1, "word": 2, "dword": 4, "fword": 6, "qword": 8, "tbyte": 10, "xmmword": 16, "ymmword": 32,
+          "zmmword": 64}
+RCX = {"rcx", "ecx", "cx", "cl", "ch"}
 
 
 class Module:
@@ -110,7 +117,7 @@ class Module:
         if f.locals:
             lines.append("; locals: " + ", ".join(
                 f"{self.types.name(f.local_types[n])} {n}" if n in f.local_types else n for n in f.locals))
-        source = _Source(self.details.detail(f) if f.module != 0xFFFF else None)
+        rows = []
         for raw in out.stdout.splitlines():
             if not (hit := LINE.match(raw)):
                 continue
@@ -127,9 +134,94 @@ class Module:
                 note = self.label(rva) or (f"[{rva:#x}]" if "rip" in insn else None)
                 if note and note not in notes:
                     notes.append(note)
-            lines += source.at(addr - start)
-            lines.append(f"  +{addr - start:05x}  {insn:<56}" + (f" ; {'; '.join(notes)}" if notes else ""))
+            rows.append((addr - start, insn, notes))
+        detail = self.details.detail(f) if f.module != 0xFFFF else None
+        source, fields = _Source(detail), _Fields(self.types, detail, f, rows)
+        for i, (offset, insn, notes) in enumerate(rows):
+            after = rows[i + 1][0] if i + 1 < len(rows) else f.length
+            notes += [n for n in fields.notes(offset, insn, after) if n not in notes]
+            lines += source.at(offset)
+            lines.append(f"  +{offset:05x}  {insn:<56}" + (f" ; {'; '.join(notes)}" if notes else ""))
         return "\n".join(lines) + "\n"
+
+
+class _Fields:
+    """Names what a memory operand [reg + disp] reaches, where the PDB says what reg holds: `this->mFoo`,
+    `Local.mBar`, `&this->mFoo` for a lea. A store into a variable's memory is named only if the variable
+    still lives there after it. Besides the PDB's ranges, `this` is in rcx at entry: up to the first
+    instruction that writes rcx or calls (included: it reads its operands first), and not past where a jump
+    from further on lands."""
+
+    def __init__(self, types, detail, f, rows):
+        self.types, self.variables = types, detail.variables if detail else []
+        this = f.local_types.get("this")
+        self.this = types.pointee(this) if this is not None else None
+        self.entry = -1
+        if self.this is not None and rows:
+            self.entry = next((o for o, insn, _ in rows if _writes_rcx(insn)), rows[-1][0])
+            for o, insn, _ in rows:
+                if o >= self.entry and insn.startswith("j") and (hit := re.search(r"\+([0-9a-f]{5})$", insn)):
+                    self.entry = min(self.entry, int(hit.group(1), 16) - 1)
+
+    def notes(self, offset, insn, after):
+        mnemonic, _, operands = insn.partition("\t")
+        out = []
+        for hit in MEMORY.finditer(operands):
+            size, reg, sign, disp = hit.groups()
+            if reg in REGISTERS:
+                disp = (-1 if sign == "-" else 1) * int(disp, 0) if disp else 0
+                store = hit.start() == 0 and not mnemonic.startswith(("cmp", "test", "push", "bt", "ucomis", "comis"))
+                name = self._name(offset, REGISTERS[reg], disp, None if mnemonic == "lea" else ACCESS.get(size),
+                                  after if store else None)
+                if name:
+                    out.append(("&" if mnemonic == "lea" else "") + name)
+        return out
+
+    def _name(self, offset, reg, disp, size, after):
+        t = self.types
+        for v in self.variables:
+            for kind, r, at, ranges in v.homes:
+                if r != reg or not any(a <= offset < b for a, b in ranges):
+                    continue
+                if kind == "register" and (target := t.pointee(v.type_index)):
+                    if path := t.field_path(target, disp, size):
+                        return f"{v.name}->{path}"
+                elif kind == "field" and (held := t.member_at(v.type_index, at)):
+                    if (target := t.pointee(held[1])) and (path := t.field_path(target, disp, size)):
+                        return f"{_join(v.name, held[0])}->{path}"
+                elif kind == "memory" and 0 <= disp - at < max(t.size(v.type_index), 1):
+                    if after is not None and not any(a <= after < b for a, b in ranges):
+                        continue  # a store that ends the variable's life there: what it writes is something else
+                    path = t.field_path(v.type_index, disp - at, size)
+                    if path:
+                        return _join(v.name, path)
+                    return v.name + (f"+{disp - at:#x}" if path is None and disp != at else "")
+        if reg == REGISTERS["rcx"] and offset <= self.entry and (path := t.field_path(self.this, disp, size)):
+            return f"this->{path}"
+        return None
+
+
+def _join(name, path):
+    return f"{name}{path}" if path.startswith("[") else f"{name}.{path}"
+
+
+def _writes_rcx(insn):
+    """Whether an instruction (Intel syntax, as objdump writes it) may change rcx: a call, a string
+    instruction with a rep prefix, an instruction writing its first operand when that is rcx."""
+    words = insn.replace("\t", " ").replace(",", " , ").split()
+    if words and words[0] == "lock":
+        words = words[1:]
+    if not words:
+        return False
+    m = words[0]
+    if m.startswith(("call", "rep", "loop")) or m in ("syscall", "cpuid", "rdtscp"):
+        return True
+    if m.startswith("j") or m in ("cmp", "test", "push", "bt", "ret", "nop", "comiss", "comisd", "ucomiss", "ucomisd"):
+        return False
+    operands = " ".join(words[1:]).split(" , ")
+    if m in ("xchg", "xadd", "cmpxchg"):
+        return any(o.strip() in RCX for o in operands)
+    return operands[0].strip() in RCX
 
 
 class _Source:

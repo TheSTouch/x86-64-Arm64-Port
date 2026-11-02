@@ -14,6 +14,23 @@ CODE = b"\xcc" * 0x10 + b"\xff\x15" + struct.pack("<i", 0x2040 - 0x1016)
 CODE += b"\x48\x8d\x0d" + struct.pack("<i", STRING_RVA - 0x101d) + b"\xc3"
 
 
+# Construct's code for build_pdb(fields=True): this in rcx at entry, then Widget in rax (+0x14..+0x1e)
+FIELDS_CODE = bytes.fromhex(
+    "488b01"            # +00 mov rax, qword ptr [rcx]
+    "8b5114"            # +03 mov edx, dword ptr [rcx + 0x14]
+    "8b5124"            # +06 mov edx, dword ptr [rcx + 0x24]
+    "488d5120"          # +09 lea rdx, [rcx + 0x20]
+    "488b8140000000"    # +0d mov rax, qword ptr [rcx + 0x40]
+    "0fb64950"          # +14 movzx ecx, byte ptr [rcx + 0x50]
+    "8b4808"            # +18 mov ecx, dword ptr [rax + 0x8]
+    "8b4a08"            # +1b mov ecx, dword ptr [rdx + 0x8]
+    "0fb6442470"        # +1e movzx eax, byte ptr [rsp + 0x70]
+    "8b4c2428"          # +23 mov ecx, dword ptr [rsp + 0x28]
+    "8b4108"            # +27 mov eax, dword ptr [rcx + 0x8]
+    "89442470"          # +2a mov dword ptr [rsp + 0x70], eax: Copy's last instruction there
+    "c3")               # +2e ret
+
+
 def build_dll():
     image = bytearray(build_pe(CODE))
     text = "Hello, loading".encode("utf-16-le") + b"\0\0"
@@ -57,6 +74,28 @@ class DecompTest(unittest.TestCase):
             ";   > inlined Detail::Clear (Array.h:50)", ";     Array.h:51", "+0000d",
             ";   < Detail::Clear", ";   Array.h:102", "+0000e",
             "; < Screen::Reset", "; Screen.cpp:21", "+00010"])
+
+    @unittest.skipUnless(shutil.which("objdump"), "needs objdump (Xcode command line tools)")
+    def test_fields_named_where_the_pdb_says_which_register_holds_what(self):
+        data = bytearray(self.dll.read_bytes())
+        data[0x410:0x410 + len(FIELDS_CODE)] = FIELDS_CODE
+        self.dll.write_bytes(bytes(data))
+        self.dll.with_suffix(".pdb").write_bytes(build_pdb(fields=True))
+        m = decomp.Module(self.dll)
+        notes = {}
+        for line in m.disassemble(m.function("FGScreen::Construct"), length=len(FIELDS_CODE)).splitlines():
+            if line.startswith("  +"):
+                notes[line.split()[0]] = line.partition(" ; ")[2]
+        self.assertEqual(notes, {
+            "+00000": "this->__vfptr", "+00003": "this->mSlots[1]", "+00006": "this->mPair.B",
+            "+00009": "&this->mPair", "+0000d": "this->mWidget", "+00014": "this->mType",
+            "+00018": "Widget->Count",  # a register range from the PDB; Count is in the base class
+            "+0001b": "",               # rdx "may have no name" there
+            "+0001e": "Copy.mType",     # frame-relative: [rsp + 0x20] is Copy
+            "+00023": "Slot",
+            "+00027": "",               # rcx was written at +0x14: no longer this
+            "+0002a": "",               # a store ending Copy's range: what it writes is no longer Copy
+            "+0002e": ""})
 
     @unittest.skipUnless(shutil.which("objdump"), "needs objdump (Xcode command line tools)")
     def test_jumps_inside_the_function_read_as_offsets(self):

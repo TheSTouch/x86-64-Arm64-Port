@@ -4,7 +4,8 @@ Reads what the recompilation needs: the signature (a PDB belongs to a binary
 when its GUID and age match the binary's CodeView record, which pe.parse reads
 as pdb_guid and pdb_age), every function with its source file, lines and named
 locals, and the public symbols with their decorated names. `Details` reads one
-function further: the line of every instruction and its inlined calls.
+function further: the line of every instruction, its inlined calls, and where
+each typed local lives; `Types.field_path` names the member at an offset.
 """
 
 import math
@@ -17,6 +18,10 @@ MAGIC = b"Microsoft C/C++ MSF 7.00\r\n\x1aDS\0\0\0"
 S_END, S_GPROC32, S_LPROC32, S_PUB32 = 0x0006, 0x1110, 0x110F, 0x110E
 S_LOCAL, S_REGREL32, S_INLINESITE, S_INLINESITE_END = 0x113E, 0x1111, 0x114D, 0x114E
 S_GPROC32_ID, S_LPROC32_ID, S_INLINESITE2 = 0x1147, 0x1146, 0x115D
+S_BLOCK32, S_FRAMEPROC = 0x1103, 0x1012
+S_DEFRANGE_REGISTER, S_DEFRANGE_FRAMEPOINTER_REL, S_DEFRANGE_SUBFIELD_REGISTER = 0x1141, 0x1142, 0x1143
+S_DEFRANGE_FRAMEPOINTER_REL_FULL_SCOPE, S_DEFRANGE_REGISTER_REL = 0x1144, 0x1145
+CV_RSP, CV_RBP, CV_R13 = 335, 334, 341  # CodeView's x64 registers: rax 328, rbx, rcx, rdx, rsi, rdi, rbp, rsp, r8-r15
 PROCS = {S_GPROC32, S_LPROC32, S_GPROC32_ID, S_LPROC32_ID}
 DEBUG_S_LINES, DEBUG_S_FILECHKSMS, DEBUG_S_INLINEELINES = 0xF2, 0xF4, 0xF6
 HIDDEN_LINE = 0xF00000  # 0xfeefee and 0xf00f00 mark code with no source line
@@ -55,9 +60,23 @@ class InlineSite:
 
 
 @dataclass
+class Variable:
+    name: str
+    type_index: int
+    homes: list = field(default_factory=list)  # (kind, register, offset, [(start, end)]): where it lives, when
+    param: bool = False
+
+
+# Home kinds: "register": the value is in the register; "field": the variable's field at `offset` is in the
+# register; "memory": the variable is at [register + offset]. Ranges are offsets from the function's start,
+# gaps removed; ranges the compiler marks "may have no name" (not on every path) are left out.
+
+
+@dataclass
 class Detail:
     lines: list      # (offset, file, line) from the line table, every file, in address order
     inlines: list    # InlineSite, in the order of their records (a parent before its children)
+    variables: list = field(default_factory=list)  # Variable, the function's and its inline sites'
 
 
 class MSF:
@@ -371,9 +390,21 @@ def _unqualified(name):
     return name[cut:]
 
 
+def _range(body, base):
+    """A CV_LVAR_ADDR_RANGE and the gaps after it, as [(start, end)] from `base` (the function's offset)."""
+    start, _, length = struct.unpack_from("<IHH", body)
+    out, at = [], start - base
+    for q in range(8, len(body) - 3, 4):
+        gap, size = struct.unpack_from("<HH", body, q)
+        out.append((at, start - base + gap))
+        at = start - base + gap + size
+    out.append((at, start - base + length))
+    return [(a, b) for a, b in out if b > a]
+
+
 class Details:
     """What a function's records say beyond its name and lines: the line of every instruction, its inlined
-    calls. Reads one module at a time (the last few are kept)."""
+    calls, its typed locals and where they live. Reads one module at a time (the last few are kept)."""
 
     def __init__(self, path, types=None):
         self.path, self._types, self._ipi, self._modules = path, types, None, {}
@@ -447,19 +478,63 @@ class Details:
         if f.record + 4 > len(syms):
             return out
         end_at = struct.unpack_from("<I", syms, f.record + 8)[0]
-        depth = 0
+        scopes, variable, frame, framed = [("proc", [(0, f.length)])], None, 0, []
         for off, kind, body in _records(syms, f.record, end_at):
             if kind in (S_INLINESITE, S_INLINESITE2) and len(body) >= 12:
                 inlinee = struct.unpack_from("<I", body, 8)[0]
                 file, line = inlinees.get(inlinee, (None, None))
                 annotations = body[16 if kind == S_INLINESITE2 else 12:]
-                out.inlines.append(InlineSite(self.inlinee_name(inlinee), file, line, depth,
-                                              _inline_ranges(annotations, file, line or 0, files)))
-                depth += 1
-            elif kind == S_INLINESITE_END:
-                depth -= 1
+                site = InlineSite(self.inlinee_name(inlinee), file, line, sum(k == "inline" for k, _ in scopes),
+                                  _inline_ranges(annotations, file, line or 0, files))
+                out.inlines.append(site)
+                scopes.append(("inline", [(a, b) for a, b, *_ in site.ranges]))
+            elif kind == S_INLINESITE_END and scopes[-1][0] == "inline":
+                scopes.pop()
+            elif kind == S_BLOCK32 and len(body) >= 18:
+                length, start = struct.unpack_from("<II", body, 8)
+                scopes.append(("block", [(start - f.offset, start - f.offset + length)]))
+            elif kind == S_END and scopes[-1][0] == "block":
+                scopes.pop()
+            elif kind == S_LOCAL and len(body) >= 6:
+                ti, flags = struct.unpack_from("<IH", body)
+                variable = Variable(_cstr(body, 6), ti, param=bool(flags & 1))
+                out.variables.append(variable)
+                continue
+            elif kind == S_REGREL32 and len(body) >= 10:
+                at, ti, reg = struct.unpack_from("<iIH", body)
+                out.variables.append(Variable(_cstr(body, 10), ti, [("memory", reg, at, scopes[-1][1])]))
+            elif kind == S_FRAMEPROC and len(body) >= 26:
+                frame = struct.unpack_from("<I", body, 22)[0]
+            elif variable is not None and kind == S_DEFRANGE_REGISTER and len(body) >= 12:
+                reg, maybe = struct.unpack_from("<HH", body)
+                if not maybe & 1 and (where := _range(body[4:], f.offset)):
+                    variable.homes.append(("register", reg, 0, where))
+                continue
+            elif variable is not None and kind == S_DEFRANGE_SUBFIELD_REGISTER and len(body) >= 16:
+                reg, maybe, parent = struct.unpack_from("<HHI", body)
+                if not maybe & 1 and (where := _range(body[8:], f.offset)):
+                    variable.homes.append(("field", reg, parent & 0xFFF, where))
+                continue
+            elif variable is not None and kind == S_DEFRANGE_REGISTER_REL and len(body) >= 16:
+                reg, flags, at = struct.unpack_from("<HHi", body)
+                if not flags & 1 and (where := _range(body[8:], f.offset)):  # 1: a spilled member, not the whole
+                    variable.homes.append(("memory", reg, at, where))
+                continue
+            elif variable is not None and kind == S_DEFRANGE_FRAMEPOINTER_REL and len(body) >= 12:
+                if where := _range(body[4:], f.offset):
+                    framed.append((variable, struct.unpack_from("<i", body)[0], where))
+                continue
+            elif variable is not None and kind == S_DEFRANGE_FRAMEPOINTER_REL_FULL_SCOPE and len(body) >= 4:
+                framed.append((variable, struct.unpack_from("<i", body)[0], scopes[-1][1]))
+                continue
+            variable = None
+        # Frame-relative homes: from the frame register S_FRAMEPROC names (it follows them), one for
+        # parameters, one for locals: 1 rsp after the prolog, 2 rbp, 3 r13.
+        for v, at, where in framed:
+            reg = {1: CV_RSP, 2: CV_RBP, 3: CV_R13}.get(frame >> (16 if v.param else 14) & 3)
+            if reg:
+                v.homes.append(("memory", reg, at, where))
         return out
-
 
 # Type records (TPI stream). Only what describing a class needs: layouts, bases, members and virtual functions.
 LF_MODIFIER, LF_POINTER, LF_PROCEDURE, LF_MFUNCTION = 0x1001, 0x1002, 0x1008, 0x1009
@@ -469,6 +544,10 @@ LF_ENUMERATE, LF_ARRAY, LF_CLASS, LF_STRUCTURE, LF_UNION, LF_ENUM = 0x1502, 0x15
 LF_MEMBER, LF_STMEMBER, LF_METHOD, LF_NESTTYPE, LF_ONEMETHOD = 0x150D, 0x150E, 0x150F, 0x1510, 0x1511
 UDTS = {LF_CLASS, LF_STRUCTURE, LF_UNION, LF_ENUM}
 INTRO_VIRTUAL = {4, 6}  # method property: introducing virtual, pure introducing virtual
+SIMPLE_SIZE = {0x03: 0, 0x08: 4, 0x10: 1, 0x20: 1, 0x68: 1, 0x69: 1, 0x70: 1, 0x7C: 1, 0x30: 1, 0x71: 2, 0x7A: 2,
+               0x11: 2, 0x21: 2, 0x72: 2, 0x73: 2, 0x31: 2, 0x12: 4, 0x22: 4, 0x74: 4, 0x75: 4, 0x7B: 4, 0x40: 4,
+               0x32: 4, 0x13: 8, 0x23: 8, 0x76: 8, 0x77: 8, 0x41: 8, 0x33: 8}
+VFPTR = 0x0603  # a 64-bit void*: the type given to a class's vtable pointer
 SIMPLE = {0x03: "void", 0x08: "HRESULT", 0x10: "signed char", 0x20: "unsigned char", 0x68: "int8", 0x69: "uint8",
           0x70: "char", 0x71: "wchar_t", 0x7A: "char16_t", 0x7B: "char32_t", 0x7C: "char8_t",
           0x11: "short", 0x21: "unsigned short", 0x72: "int16", 0x73: "uint16", 0x12: "long", 0x22: "unsigned long",
@@ -486,6 +565,11 @@ class UDT:
     methods: list = field(default_factory=list)    # (name, type, vtable offset or None)
     statics: list = field(default_factory=list)    # (name, type)
     enumerators: list = field(default_factory=list)  # (name, value)
+    fields: list = field(default_factory=list)     # (offset, name, type index): members, bases (name None), vfptr
+
+
+def _join_path(name, path):
+    return f"{name}{path}" if path.startswith("[") else f"{name}.{path}"
 
 
 def _numeric(buf, off):
@@ -513,7 +597,7 @@ class Types:
         while off + 4 <= min(header + size, len(self.buf)):
             self.offsets.append(off)
             off += 2 + struct.unpack_from("<H", self.buf, off)[0]
-        self._by_name = None
+        self._by_name, self._layouts = None, {}
 
     def record(self, ti):
         i = ti - self.first
@@ -590,9 +674,15 @@ class Types:
 
     def udt(self, name):
         ti = self._index().get(name)
-        if ti is None:
-            return None
+        return None if ti is None else self.udt_at(ti)
+
+    def udt_at(self, ti):
+        """The class, struct, union or enum defined at type index ti (a forward reference: its definition)."""
+        ti = self.resolve(ti)
         kind, body = self.record(ti)
+        if kind not in UDTS:
+            return None
+        name = self._udt_name(kind, body)
         if kind == LF_ENUM:
             fields = struct.unpack_from("<I", body, 8)[0]
             out = UDT("enum", name, 0)
@@ -618,6 +708,7 @@ class Types:
                 _, base = struct.unpack_from("<HI", body, p)
                 offset, p = _numeric(body, p + 6)
                 out.bases.append((self.name(base), offset))
+                out.fields.append((offset, None, base))
             elif leaf in (LF_VBCLASS, LF_IVBCLASS):
                 _, base, _ = struct.unpack_from("<HII", body, p)
                 _, p = _numeric(body, p + 10)
@@ -628,6 +719,7 @@ class Types:
                 offset, p = _numeric(body, p + 6)
                 name = _cstr(body, p)
                 out.members.append((offset, name, self.name(mtype)))
+                out.fields.append((offset, name, mtype))
                 p += len(name.encode()) + 1
             elif leaf == LF_STMEMBER:
                 _, mtype = struct.unpack_from("<HI", body, p)
@@ -652,6 +744,8 @@ class Types:
             elif leaf in (LF_NESTTYPE, LF_VFUNCTAB, LF_INDEX):
                 ti2 = struct.unpack_from("<I", body, p + 2)[0]
                 p += 6
+                if leaf == LF_VFUNCTAB:
+                    out.fields.append((0, "__vfptr", VFPTR))
                 if leaf == LF_NESTTYPE:
                     p += len(_cstr(body, p).encode()) + 1
                 elif leaf == LF_INDEX:
@@ -677,6 +771,100 @@ class Types:
                 p += 4
             out.append((mtype, vbase))
         return out
+
+    def resolve(self, ti):
+        """ti with its modifiers (const, volatile) taken off, and a forward reference replaced by the definition."""
+        for _ in range(8):
+            kind, body = self.record(ti)
+            if kind == LF_MODIFIER:
+                ti = struct.unpack_from("<I", body)[0]
+            elif kind in UDTS and struct.unpack_from("<H", body, 2)[0] & 0x80:
+                return self._index().get(self._udt_name(kind, body), ti)
+            else:
+                return ti
+        return ti
+
+    def pointee(self, ti):
+        """The type a pointer or reference type points to, resolved; None for anything else."""
+        kind, body = self.record(self.resolve(ti))
+        return self.resolve(struct.unpack_from("<I", body)[0]) if kind == LF_POINTER else None
+
+    def size(self, ti, depth=0):
+        if ti < 0x1000:
+            return 8 if ti >> 8 & 0xF else SIMPLE_SIZE.get(ti & 0xFF, 0)
+        kind, body = self.record(self.resolve(ti))
+        if kind == LF_POINTER:
+            return struct.unpack_from("<I", body, 4)[0] >> 13 & 0x3F
+        if kind == LF_ARRAY:
+            return _numeric(body, 8)[0]
+        if kind in (LF_CLASS, LF_STRUCTURE, LF_UNION):
+            return _numeric(body, 16 if kind != LF_UNION else 8)[0]
+        if kind in (LF_ENUM, LF_BITFIELD) and depth < 4:
+            return self.size(struct.unpack_from("<I", body, 4 if kind == LF_ENUM else 0)[0], depth + 1)
+        return 0
+
+    def field_path(self, ti, offset, size=None):
+        """The member of type ti at `offset`, read `size` bytes at a time (None: its address is taken):
+        "mWidget", "mPair.B", "mSlots[1]", "mWidget+0x2", a base class's member by its name; "" for an access
+        covering the whole of ti; None in padding or past the end. A wider access is named by the member it
+        starts at."""
+        if offset == 0 and size is not None and size >= self.size(ti) > 0:
+            return ""
+        path = self._path(ti, offset, size, 0)
+        return path.lstrip(".") if path else None
+
+    def _path(self, ti, offset, size, depth):
+        ti = self.resolve(ti)
+        kind, body = self.record(ti)
+        if depth > 12 or offset < 0:
+            return None
+        if kind == LF_ARRAY:
+            each = self.size(struct.unpack_from("<I", body)[0])
+            if not each or offset >= self.size(ti):
+                return None
+            return f"[{offset // each}]" + self._inside(struct.unpack_from("<I", body)[0], offset % each, size, depth)
+        if kind not in (LF_CLASS, LF_STRUCTURE, LF_UNION):
+            return None
+        if ti not in self._layouts:
+            self._layouts[ti] = self.udt_at(ti).fields
+        fields = self._layouts[ti]
+        hits = [(o, n, t) for o, n, t in fields if n and o <= offset < o + max(self.size(t), 1)]
+        if hits:
+            o, n, t = hits[0]
+            if self.record(t)[0] == LF_BITFIELD:  # bitfields share their bytes
+                names = [n2 for o2, n2, t2 in hits if o2 == o and self.record(t2)[0] == LF_BITFIELD]
+                n = "|".join(names[:4]) + ("|..." if len(names) > 4 else "")
+            return "." + n + self._inside(t, offset - o, size, depth)
+        for o, n, t in fields:
+            if n is None and o is not None and o <= offset < o + self.size(t):
+                return self._path(t, offset - o, size, depth + 1)
+        return None
+
+    def member_at(self, ti, offset, depth=0):
+        """(path, type index) of the member that starts at `offset` and holds no member of its own there:
+        ("SharedReferenceCount.ReferenceController", ...) inside a TSharedPtr; None if there is none."""
+        ti = self.resolve(ti)
+        kind, _ = self.record(ti)
+        if kind not in (LF_CLASS, LF_STRUCTURE, LF_UNION) or depth > 12:
+            return None
+        if ti not in self._layouts:
+            self._layouts[ti] = self.udt_at(ti).fields
+        for o, n, t in self._layouts[ti]:
+            if o is not None and o <= offset < o + max(self.size(t), 1):
+                inner = self.member_at(t, offset - o, depth + 1)
+                if n is None:
+                    return inner
+                if inner:
+                    return _join_path(n, inner[0]), inner[1]
+                return (n, t) if o == offset else None
+        return None
+
+    def _inside(self, ti, offset, size, depth):
+        """What follows a member's name: nothing when the access covers the whole member, else the field
+        inside it, else +offset."""
+        if offset == 0 and (size is None or size >= self.size(ti)):
+            return ""
+        return self._path(ti, offset, size, depth + 1) or (f"+{offset:#x}" if offset else "")
 
     def vtable(self, name, depth=0):
         """{vtable offset: "Class::method(args)"} for the primary vtable, bases first, from introducing virtuals."""

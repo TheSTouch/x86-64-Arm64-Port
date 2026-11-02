@@ -56,9 +56,10 @@ def info_stream(names_stream):
     return out
 
 
-def build_pdb(folded=False):
+def build_pdb(folded=False, fields=False):
     """Stream 5 is the module, 6 the symbol records (publics), 7 /names. folded: a second function at
-    FGScreen::Construct's address, with its own line subsection after Construct's."""
+    FGScreen::Construct's address, with its own line subsection after Construct's. fields: Construct's typed
+    locals and where they live (FIELDS_CODE)."""
     files = b"\0D:\\Game\\Source\\Game\\Private\\Screen.cpp\0D:\\Engine\\Core\\Array.h\0"
     names = struct.pack("<III", 0xEFFEEFFE, 1, len(files)) + files
     # module stream: signature, then symbols, then C13 line info
@@ -72,6 +73,18 @@ def build_pdb(folded=False):
     body += rec(0x114E, b"")
     body += rec(0x114E, b"")
     body += rec(0x1111, struct.pack("<IIH", 0x28, 0x74, 335) + b"Slot\0")
+    if fields:
+        def where(start, length, *gaps):  # a range at section offset 0x10 + start, and its gaps
+            return struct.pack("<IHH", 0x10 + start, 1, length) + b"".join(struct.pack("<HH", *g) for g in gaps)
+        body += rec(0x113E, struct.pack("<IH", 0x1005, 1) + b"this\0")            # no range: rcx at entry
+        body += rec(0x113E, struct.pack("<IH", 0x1005, 0) + b"Widget\0")
+        body += rec(0x1141, struct.pack("<HH", 328, 0) + where(0x14, 0x0a))       # rax, +0x14..+0x1e
+        body += rec(0x113E, struct.pack("<IH", 0x1005, 0) + b"Other\0")
+        body += rec(0x1141, struct.pack("<HH", 331, 1) + where(0x1b, 3))           # rdx, "may have no name"
+        body += rec(0x1141, struct.pack("<HH", 330, 0) + where(0x20, 0x0b, (0, 0x0b)))  # rcx, all a gap
+        body += rec(0x113E, struct.pack("<IH", 0x1004, 0) + b"Copy\0")
+        body += rec(0x1142, struct.pack("<i", 0x20) + where(0, 0x2e))             # [frame + 0x20]
+        body += rec(0x1012, struct.pack("<IIIIIHI", 0x80, 0, 0, 0, 0, 0, 1 << 14 | 1 << 16))  # frame: rsp
     head = len(rec(0x1110, b"\0" * 35 + b"FGScreen::Construct\0"))
     end_at = len(syms) + head + len(body)  # the S_END closing the procedure
     proc = rec(0x1110, struct.pack("<IIIIIIIIHB", 0, end_at, 0, 0x40, 4, 0x3C, 0x1007, 0x10, 1, 0)
@@ -143,9 +156,12 @@ def build_tpi():
         leaf(0x1504, struct.pack("<HHIIIH", 3, 0, T, 0, 0, 0x10) + b"IBase\0"),
         # 0x1002: forward reference to Screen (ignored by lookups)
         leaf(0x1504, struct.pack("<HHIIIH", 0, 0x80, 0, 0, 0, 0) + b"Screen\0"),
-        # 0x1003: Screen's field list: base IBase at +0, override of the virtual, TSharedPtr-like member at +0x40
+        # 0x1003: Screen's field list: base IBase at +0, override of the virtual, an int[3] at +0x10, an FPair
+        # at +0x20, TSharedPtr-like member at +0x40
         leaf(0x1203, sub(0x1400, struct.pack("<HIH", 3, 0x1001, 0))
              + sub(0x1511, struct.pack("<HI", 3 | (1 << 2), 0x1007) + b"InitSettingsFromConfig\0")
+             + sub(0x150D, struct.pack("<HIH", 1, 0x100B, 0x10) + b"mSlots\0")
+             + sub(0x150D, struct.pack("<HIH", 1, 0x100A, 0x20) + b"mPair\0")
              + sub(0x150D, struct.pack("<HIH", 1, 0x1005, 0x40) + b"mWidget\0")
              + sub(0x150D, struct.pack("<HIH", 1, 0x20, 0x50) + b"mType\0")),
         # 0x1004: class Screen, size 0x58
@@ -158,6 +174,13 @@ def build_tpi():
         leaf(0x1009, struct.pack("<IIIBBHIi", 0x0003, 0x1001, 0, 0, 0, 1, 0x1008, 0)),
         # 0x1008: argument list (const char*)
         leaf(0x1201, struct.pack("<II", 1, 0x0670)),
+        # 0x1009: FPair's field list: int A at +0, int B at +4
+        leaf(0x1203, sub(0x150D, struct.pack("<HIH", 3, 0x74, 0) + b"A\0")
+             + sub(0x150D, struct.pack("<HIH", 3, 0x74, 4) + b"B\0")),
+        # 0x100A: struct FPair, size 8
+        leaf(0x1505, struct.pack("<HHIIIH", 2, 0, 0x1009, 0, 0, 8) + b"FPair\0"),
+        # 0x100B: int[3]
+        leaf(0x1503, struct.pack("<IIH", 0x74, 0x23, 12) + b"\0"),
     ]
     data = b"".join(records)
     header = struct.pack("<IIIII", 20040203, 56, T, T + len(records), len(data)) + b"\0" * 36
@@ -213,6 +236,37 @@ class PDBTest(unittest.TestCase):
         self.assertEqual(pdb.Details(path).detail(folded).lines, [(0, screen, 40), (8, screen, 42)])
         self.assertEqual(pdb.Details(path).detail(construct).lines[0], (0, screen, 20))
 
+    def test_field_paths(self):
+        t = pdb.Types(self.write(build_pdb()))
+        self.assertEqual(t.pointee(0x1005), 0x1004)
+        self.assertEqual(t.size(0x1004), 0x58)
+        self.assertEqual(t.field_path(0x1004, 0x40, 8), "mWidget")
+        self.assertEqual(t.field_path(0x1004, 0x14, 4), "mSlots[1]")
+        self.assertEqual(t.field_path(0x1004, 0x24, 4), "mPair.B")
+        self.assertEqual(t.field_path(0x1004, 0x20, None), "mPair")       # lea: the member's address
+        self.assertEqual(t.field_path(0x1004, 0x20, 8), "mPair")          # the whole struct
+        self.assertEqual(t.field_path(0x1004, 0x42, 2), "mWidget+0x2")
+        self.assertEqual(t.field_path(0x1004, 8, 4), "Count")             # in the base class
+        self.assertEqual(t.field_path(0x1004, 0, 8), "__vfptr")
+        self.assertIsNone(t.field_path(0x1004, 0x30, 8))                  # padding
+        self.assertIsNone(t.field_path(0x1004, 0x58, 4))                  # past the end
+        # what a register holds when the PDB says it holds a variable's field (S_DEFRANGE_SUBFIELD_REGISTER)
+        self.assertEqual(t.member_at(0x1004, 0x40), ("mWidget", 0x1005))
+        self.assertEqual(t.member_at(0x1004, 0x24), ("mPair.B", 0x74))
+        self.assertEqual(t.member_at(0x1004, 8), ("Count", 0x74))
+        self.assertIsNone(t.member_at(0x1004, 0x42))
+
+    def test_variables_and_where_they_live(self):
+        path = self.write(build_pdb(fields=True))
+        v = {x.name: x for x in pdb.Details(path).detail(pdb.functions(path)[0]).variables}
+        self.assertEqual(v["this"].homes, [])
+        self.assertEqual(v["Widget"].homes, [("register", 328, 0, [(0x14, 0x1e)])])
+        self.assertEqual(v["Other"].homes, [])                            # only "may have no name" or gaps
+        self.assertEqual(v["Copy"].homes, [("memory", 335, 0x20, [(0, 0x2e)])])
+        self.assertEqual(v["Slot"].homes, [("memory", 335, 0x28, [(0, 0x40)])])
+        self.assertEqual(pdb._range(struct.pack("<IHH", 0x20, 1, 0x10) + struct.pack("<HHHH", 2, 3, 8, 8), 0x10),
+                         [(0x10, 0x12), (0x15, 0x18)])
+
     def test_binary_annotations(self):
         # ChangeCodeOffset 0x1743, ChangeLineOffset +4, ChangeCodeLengthAndCodeOffset (0x12, 0x12): MSVC's
         # encoding, the offset counted from the previous range's start; operands of 2 and 4 bytes
@@ -236,7 +290,8 @@ class PDBTest(unittest.TestCase):
         screen = t.udt("Screen")
         self.assertEqual(screen.size, 0x58)
         self.assertEqual(screen.bases, [("IBase", 0)])
-        self.assertEqual(screen.members, [(0x40, "mWidget", "Screen*"), (0x50, "mType", "unsigned char")])
+        self.assertEqual(screen.members, [(0x10, "mSlots", "int[12]"), (0x20, "mPair", "FPair"),
+                                          (0x40, "mWidget", "Screen*"), (0x50, "mType", "unsigned char")])
         self.assertEqual(t.udt("IBase").members, [(8, "Count", "int")])
         self.assertEqual(t.vtable("Screen"), {0x80: "IBase::InitSettingsFromConfig(char*)"})
         self.assertIsNone(t.udt("Missing"))
