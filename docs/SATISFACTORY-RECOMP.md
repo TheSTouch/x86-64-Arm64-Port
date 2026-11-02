@@ -238,7 +238,7 @@ FactoryGame.dll (15 MB) cannot be swapped whole, so its functions are replaced o
 - **Recovering FactoryGame (2026-11-02).** Functions compile in the shipped build's unity blob (the PDB names each
   function's `Module.FactoryGame.<n>.cpp`): what the shipped build inlined from another file of its blob is only inlined
   here if that file's function is recovered too. Coffee Stain's checks are `fgcheck` (the CSS engine's FG_CHECK_IMPL).
-  By the morning of 2026-11-02: 134 FactoryGame functions hooked, every one matching byte for byte (game instance,
+  By the morning of 2026-11-02: 143 FactoryGame functions hooked, every one matching byte for byte (game instance,
   user settings, local player, game engine and game mode, game session, the menus' own widgets (menu base, widget
   switcher, button hints, base UI and their constructors), player input, save system, settings apply types...).
   Each batch ran in the shipped game through the watcher: the full menu navigation (every Options tab, New Game's
