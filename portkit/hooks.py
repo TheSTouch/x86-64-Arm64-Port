@@ -141,6 +141,8 @@ def plan(recovered, others, modules):
                                         "inlined copies would stay"))
             elif length < MIN_HOOK:
                 p.skipped.append((name, f"shorter than {MIN_HOOK} bytes ({length})"))
+            elif any(h.rva == rva for h in p.hooks):
+                p.skipped.append((name, f"folded with {next(h.name for h in p.hooks if h.rva == rva)}: hooked once"))
             else:
                 p.hooks.append(Hook(name, rva, length, game.bytes_at(rva, 8).ljust(8, b"\0")))
     return p

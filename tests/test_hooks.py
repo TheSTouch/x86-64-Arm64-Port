@@ -32,7 +32,7 @@ class ModuleFixture:
     def __init__(self, name, symbols, functions=None, code=b""):
         self.name, self.symbols, self.functions = name, symbols, functions or {}
         self.timestamp, self.size_of_image, self.code = 0x1234, 0x8000, code
-        self.all_function_rvas = sorted(r for r, _, _ in self.functions.values())
+        self.all_function_rvas = sorted({r for r, _, _ in self.functions.values()})
 
     def bytes_at(self, rva, n):
         return self.code[:n]
@@ -42,12 +42,13 @@ GAME = ModuleFixture("Game-FactoryGame-Win64-Shipping.dll",
                      {CONSTRUCT: (0x1010, True), "?Helper@@YAXXZ": (0x1100, True), "?GData@@3HA": (0x5000, False),
                       "?Inline@FGScreen@@QEAAHXZ": (0x1200, True), "?Tiny@@YAXXZ": (0x1300, True),
                       "__security_cookie": (0x6000, False), "memcpy": (0x1400, True),
-                      "??__EGName@@YAXXZ": (0x1500, True)},
+                      "??__EGName@@YAXXZ": (0x1500, True), "?Folded@@YAXXZ": (0x1010, True)},
                      {CONSTRUCT: (0x1010, 0x40, "D:\\Game\\Source\\Game\\Private\\Screen.cpp"),
                       "?Helper@@YAXXZ": (0x1100, 0x20, "D:\\Game\\Source\\Game\\Private\\Helper.cpp"),
                       "?Inline@FGScreen@@QEAAHXZ": (0x1200, 0x10, "D:\\Game\\Source\\Game\\Public\\Screen.h"),
                       "?Tiny@@YAXXZ": (0x1300, 3, "D:\\Game\\Source\\Game\\Private\\Tiny.cpp"),
-                      "??__EGName@@YAXXZ": (0x1500, 0x20, "D:\\Game\\Source\\Game\\Private\\Screen.cpp")},
+                      "??__EGName@@YAXXZ": (0x1500, 0x20, "D:\\Game\\Source\\Game\\Private\\Screen.cpp"),
+                      "?Folded@@YAXXZ": (0x1010, 0x40, "D:\\Game\\Source\\Game\\Private\\Other.cpp")},
                      code=bytes(range(0x40, 0x50)))
 PLUGIN = ModuleFixture("Game-OnlineIntegration-Win64-Shipping.dll", {"?Login@@YAXXZ": (0x2000, True)})
 
@@ -63,6 +64,12 @@ class PlanTest(unittest.TestCase):
         skipped = dict(p.skipped)
         self.assertIn("header", skipped["?Inline@FGScreen@@QEAAHXZ"])
         self.assertIn("shorter than", skipped["?Tiny@@YAXXZ"])
+
+    def test_folded_functions_are_hooked_once(self):
+        # identical code folded at one address: one jump there serves both
+        p = self.plan([obj(defined=[CONSTRUCT, "?Folded@@YAXXZ"])])
+        self.assertEqual([h.rva for h in p.hooks], [0x1010])
+        self.assertIn("folded", dict(p.skipped)["?Folded@@YAXXZ"])
 
     def test_dynamic_initializers_are_not_hooked(self):
         # they initialize the file's statics: in the hook DLL those are its own copies, the game's would stay empty
