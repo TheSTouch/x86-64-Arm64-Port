@@ -125,6 +125,52 @@ class MatchTest(unittest.TestCase):
         self.assertEqual(r.offset, 0x30)
         self.assertIn("0x30 bytes", r.detail)
 
+    def test_matched_scores_zero(self):
+        r = self.match([(CONSTRUCT, shipped_body(), [(2, 4), (9, 4)])])[CONSTRUCT]
+        self.assertEqual(r.score, 0)
+        self.assertTrue(decomp.match_line(r).endswith(" score 0"))
+        missing = self.match([("?Unknown@@YAXXZ", b"\xc3", [])])["?Unknown@@YAXXZ"]
+        self.assertTrue(decomp.match_line(missing).endswith(" score -"))
+
+    @unittest.skipUnless(shutil.which("objdump"), "needs objdump (Xcode command line tools)")
+    def test_every_difference_side_by_side(self):
+        # a nop inserted after the call: the rest shifts by one byte but still aligns
+        code = shipped_body()
+        code = code[:6] + b"\x90" + code[6:] + b""
+        obj = self.dir / "Screen.cpp.obj"
+        obj.write_bytes(build_obj([(CONSTRUCT, code, [(2, 4), (10, 4)])]))
+        (r,) = decomp.match(self.dll, obj, diff=["FGScreen::Construct"])
+        self.assertEqual((r.state, r.score), ("differs", 1))
+        marks = [row[0] for row in r.rows]
+        self.assertEqual(marks[:4], ["=", ">", "=", "="])
+        self.assertEqual(marks.count("="), len(marks) - 1)
+        self.assertEqual(r.rows[0][1:], ((0, "call qword ptr [rip + <reloc>]"), (0, "call qword ptr [rip + <reloc>]")))
+        self.assertEqual(r.rows[1][1:], (None, (6, "nop")))
+        self.assertEqual(r.rows[2][1:], ((6, "lea rcx, [rip + <reloc>]"), (7, "lea rcx, [rip + <reloc>]")))
+        listing = decomp.diff_listing(r)
+        self.assertIn("> " + " " * 60 + "+00006  nop", listing)
+        self.assertTrue(listing.rstrip().endswith("score 1"))
+        self.assertTrue(decomp.match_line(r).endswith(" score 1"))
+
+    @unittest.skipUnless(shutil.which("objdump"), "needs objdump (Xcode command line tools)")
+    def test_a_changed_instruction_scores_one(self):
+        body = bytearray(shipped_body())
+        body[8] = 0x15          # lea rdx instead of lea rcx
+        r = self.match([(CONSTRUCT, bytes(body), [(2, 4), (9, 4)])])[CONSTRUCT]
+        self.assertEqual((r.state, r.score), ("differs", 1))
+        self.assertEqual([row[0] for row in r.rows].count("!"), 1)
+
+    @unittest.skipUnless(shutil.which("objdump"), "needs objdump (Xcode command line tools)")
+    def test_jumps_inside_the_function_compare_by_displacement(self):
+        jumps = b"\x74\x02" + b"\x90\x90" + b"\xc3"     # je over two nops
+        shifted = b"\x90" + jumps                          # one more instruction before: same jump bytes
+        keys = [decomp._normalize(t, o, n, len(jumps), None)[1] for o, n, t in decomp._disassemble([jumps])[0]]
+        shifted_keys = [decomp._normalize(t, o, n, len(shifted), None)[1]
+                        for o, n, t in decomp._disassemble([shifted])[0]]
+        self.assertEqual(keys, shifted_keys[1:])
+        self.assertEqual(decomp._normalize("je\t0x4 <f0+0x4>", 0, 2, 5, None)[0], "je +00004")
+        self.assertEqual(decomp._normalize("call\t0x7f00", 0, 5, 5, None)[0], "call <reloc>")
+
     def test_a_function_the_module_does_not_have_is_missing(self):
         r = self.match([("?Unknown@@YAXXZ", b"\xc3", [])])["?Unknown@@YAXXZ"]
         self.assertEqual(r.state, "missing")

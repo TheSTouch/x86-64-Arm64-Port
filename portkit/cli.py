@@ -184,10 +184,12 @@ def cmd_decomp(a):
         print(f"{len(rows)} functions run, {sum(r.length for r in rows)} bytes", file=sys.stderr)
         return 0
     if a.match:
-        results = decomp.match(a.dll, a.match)
+        results = decomp.match(a.dll, a.match, a.diff or ())
         for r in results:
-            shipped = f"  [{r.shipped}]" if r.shipped else ""
-            print(f"{r.state:<8} {r.name}{shipped}" + (f": {r.detail}" if r.detail else ""))
+            if a.diff and (r.name in a.diff or r.shipped in a.diff):
+                print(decomp.diff_listing(r))
+            if not a.diff or r.name in a.diff or r.shipped in a.diff:
+                print(decomp.match_line(r))
         counts = {s: sum(r.state == s for r in results) for s in ("matched", "differs", "missing")}
         print(f"{len(results)} functions: {counts['matched']} matched, {counts['differs']} differing, "
               f"{counts['missing']} not in the shipped module", file=sys.stderr)
@@ -322,7 +324,10 @@ def parser():
     sp.add_argument("--type", metavar="NAME", help="a class, struct or enum: layout, members, vtable slots")
     sp.add_argument("--out", metavar="DIR", help="write functions.tsv and one .asm per function (outside this repository)")
     sp.add_argument("--match", metavar="OBJ", help="compare each function of a compiled .obj with the shipped one "
-                    "(relocated operands masked): matched, or the first difference")
+                    "(relocated operands masked): matched, or the first difference; each line ends with a score, "
+                    "the instructions not the same once both are aligned")
+    sp.add_argument("--diff", action="append", metavar="NAME", help="with --match: this function's shipped and "
+                    "compiled disassembly side by side (decorated or shipped name; may be repeated)")
     sp.add_argument("--trace", metavar="TSV", help="name the functions of a trace from the hook loader's trace mode "
                     "(RecompTrace.tsv), and sum them by source file")
     sp.set_defaults(fn=cmd_decomp)

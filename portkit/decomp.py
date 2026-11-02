@@ -6,13 +6,17 @@ literals, and the members typed locals reach (`this->mFoo`); between instruction
 the source line and the inlined calls. What `dump`
 writes is derived from the game, so it refuses to write inside this repository
 (docs/SATISFACTORY-RECOMP.md: recovered code stays on the owner's disks). `match`
-compares a compiled object file with the shipped module.
+compares a compiled object file with the shipped module, and scores each function
+by its instructions that differ once both disassemblies are aligned.
 """
 
+import difflib
+import os
 import re
 import shutil
 import subprocess
-from dataclasses import dataclass
+import tempfile
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import coff, config, pdb, pe
@@ -334,6 +338,26 @@ class Match:
     length: int = 0
     offset: int = None   # the first difference
     detail: str = ""
+    score: int = None    # instructions not the same once aligned: 0 when matched, None when missing
+    rows: list = field(default_factory=list)   # the alignment: (mark, (offset, shipped) or None, (offset, ours) or None)
+
+
+def match_line(r):
+    """One line per function of --match; it ends with `score <n>` (`score -` for a function the module lacks)."""
+    shipped = f"  [{r.shipped}]" if r.shipped else ""
+    return f"{r.state:<8} {r.name}{shipped}" + (f": {r.detail}" if r.detail else "") + \
+        f"  score {'-' if r.score is None else r.score}"
+
+
+def diff_listing(r):
+    """The shipped and compiled disassembly side by side: `=` the same, `!` changed, `<` shipped only, `>` ours
+    only; relocated operands as <reloc>. Ends with `score <n>`."""
+    out = [f"; {r.name}  [{r.shipped}]: {r.state}" + (f", {r.detail}" if r.detail else "")]
+    for mark, left, right in r.rows:
+        left = f"+{left[0]:05x}  {left[1]}" if left else ""
+        out.append(f"{mark} {left:<59} {f'+{right[0]:05x}  {right[1]}' if right else ''}".rstrip())
+    out.append(f"score {r.score}")
+    return "\n".join(out) + "\n"
 
 
 def qualified_name(decorated):
@@ -348,10 +372,12 @@ def qualified_name(decorated):
     return "::".join(reversed(parts))
 
 
-def match(dll, obj):
+def match(dll, obj, diff=()):
     """Each function of a compiled COFF object against the shipped function of the same decorated name
     (a public symbol), or else of the same qualified name when only one function has it. Bytes a
-    relocation fills are masked on both sides: the shipped code has the linker's values there."""
+    relocation fills are masked on both sides: the shipped code has the linker's values there. Differing
+    functions, and those named in `diff` (decorated or shipped name), are aligned instruction by instruction
+    (needs objdump): rows and score."""
     try:
         o = coff.parse(Path(obj).read_bytes())
     except coff.NotCOFF as e:
@@ -361,7 +387,7 @@ def match(dll, obj):
     by_name = {}
     for f in m.functions:
         by_name.setdefault(f.name, []).append(f)
-    results = []
+    results, pairs = [], []
     for fn in o.functions():
         shipped, how = by_mangled.get(fn.name), ""
         if shipped is None:
@@ -372,7 +398,88 @@ def match(dll, obj):
             results.append(Match(fn.name, "missing", detail="no function of that name in the shipped module"))
             continue
         results.append(_compare(m, fn, shipped, how))
+        pairs.append((results[-1], fn, shipped))
+    _align(m, [(r, fn, f) for r, fn, f in pairs if r.state == "differs" or r.name in diff or r.shipped in diff])
     return results
+
+
+def _align(m, pairs):
+    if not pairs or not shutil.which("objdump"):
+        return
+    blobs = []
+    for r, fn, f in pairs:
+        blobs += [m._bytes_at(m.rva(f.segment, f.offset), f.length), fn.code]
+    listings = _disassemble(blobs)
+    for i, (r, fn, f) in enumerate(pairs):
+        ours = [(o, *_normalize(t, o, n, len(fn.code), fn.masked)) for o, n, t in listings[2 * i + 1]]
+        theirs = [(o, *_normalize(t, o, n, len(blobs[2 * i]), None)) for o, n, t in listings[2 * i]]
+        rows = []
+        sm = difflib.SequenceMatcher(None, [k for *_, k in theirs], [k for *_, k in ours], autojunk=False)
+        for tag, i1, i2, j1, j2 in sm.get_opcodes():
+            left, right = [x[:2] for x in theirs[i1:i2]], [x[:2] for x in ours[j1:j2]]
+            if tag == "equal":
+                rows += [("=", a, b) for a, b in zip(left, right)]
+                continue
+            n = min(len(left), len(right))
+            rows += [("!", a, b) for a, b in zip(left[:n], right[:n])]
+            rows += [("<", a, None) for a in left[n:]] + [(">", None, b) for b in right[n:]]
+        r.rows, r.score = rows, sum(mark != "=" for mark, *_ in rows)
+        if r.state == "differs" and not r.score:
+            r.score = 1  # bytes differ where the text does not (another encoding of the same instruction)
+
+
+BRANCH = re.compile(r"^(j\w+|call|loop\w*) (0x[0-9a-f]+)$")
+RIP = re.compile(r"\[rip(?: [+-] 0x[0-9a-f]+)?\]")
+
+
+def _normalize(text, offset, length, size, masked):
+    """(shown, compared) for an instruction of a function disassembled at address 0. Relocated operands
+    become <reloc>: in the shipped code (masked None) every rip-relative operand and every branch out of the
+    function, in ours those the relocations fill. A branch inside the function shows its target as +offset
+    and compares by its displacement, so code that moved as a whole still aligns; instructions also compare
+    by their length."""
+    text = " ".join(re.sub(r"\s*<[^>]*>", "", text).partition(" # ")[0].split())
+    relocated = masked is not None and any(offset <= o < offset + length for o in masked)
+    shown = key = text
+    if hit := BRANCH.match(text):
+        target = int(hit.group(2), 16)
+        if relocated or not 0 <= target < size:
+            shown = key = f"{hit.group(1)} <reloc>"
+        else:
+            shown, key = f"{hit.group(1)} +{target:05x}", f"{hit.group(1)} .{target - offset - length:+d}"
+    elif "[rip" in text and (masked is None or relocated):
+        shown = key = RIP.sub("[rip + <reloc>]", text)
+    elif relocated:
+        shown = key = re.sub(r"0x[0-9a-f]+(?!.*0x[0-9a-f])", "<reloc>", text)
+    return shown, (key, length)
+
+
+def _disassemble(blobs):
+    """objdump over pieces of code, each at address 0 (one object file, a section each):
+    [[(offset, length, text)]]."""
+    w = coff.Writer()
+    for i, code in enumerate(blobs):
+        section = w.section(".text", coff.CODE_FLAGS)
+        w.data(section, code)
+        w.define(f"f{i}", section, 0, function=True)
+    fd, path = tempfile.mkstemp(suffix=".obj")
+    try:
+        os.write(fd, w.build())
+        os.close(fd)
+        out = subprocess.run(["objdump", "-d", "--no-show-raw-insn", "--x86-asm-syntax=intel", path],
+                             capture_output=True, text=True, check=False).stdout
+    finally:
+        os.unlink(path)
+    listings, current = [[] for _ in blobs], None
+    for raw in out.splitlines():
+        if hit := re.match(r"^[0-9a-f]+ <f(\d+)>:$", raw):
+            current = listings[int(hit.group(1))]
+        elif current is not None and (hit := LINE.match(raw)):
+            current.append([int(hit.group(1), 16), 0, hit.group(2)])
+    for code, rows in zip(blobs, listings):
+        for k, row in enumerate(rows):
+            row[1] = (rows[k + 1][0] if k + 1 < len(rows) else len(code)) - row[0]
+    return [[tuple(row) for row in rows] for rows in listings]
 
 
 def _compare(m, fn, shipped, how):
@@ -385,6 +492,7 @@ def _compare(m, fn, shipped, how):
         notes.insert(0, f"length: shipped {len(ref):#x} bytes, compiled {len(fn.code):#x} bytes")
     if first is None:
         result.detail = ", ".join([f"{len(fn.masked)} relocated bytes masked"] + notes)
+        result.score = 0
         return result
 
     def window(code):
