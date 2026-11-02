@@ -301,6 +301,80 @@ GitHub, private or public, and no cloud storage.
 This repository holds the tools (PDB reading, disassembly, the matching harness) and never game-derived
 output; `.gitignore` also refuses a `satisfactory-recomp/` folder copied in by mistake.
 
+### Sharing the work with other players (2026-11-02)
+
+Other players own the game too, but owning it does not change who may receive recovered code. What this
+repository may hold:
+
+- **Generic tools**: PDB reading, disassembly, matching, the hook loader, the build project and its scripts
+  without recovered sources.
+- **Pipelines that run on the user's own copy**: they read the user's install and write their output on the
+  user's machine. Function names, lines and types come from the user's own PDBs at run time, never from here.
+
+What it may not hold, in any encoding: recovered C++, a diff or patch against the shipped binary that rebuilds
+it, per-function snippets, or hint files detailed enough to regenerate the recovered code exactly (those are
+the code in another form). A script that "decompiles it for you" in a few days without AI would need exactly
+that knowledge, so it is not an option. A tool that redoes the recovery on the user's machine (a decompiler
+draft and an AI loop, checked by the matcher) can be published; its output is that user's own recovery.
+
+Existing recompilation projects (N64Recomp and Zelda64Recomp, XenonRecomp) ship a tool and a config and
+generate code from the user's own game, but they translate machine code mechanically, and for this game that
+route is ruled out above (the ABI boundary). Handing out the recovered source itself would need the rights
+holder's permission.
+
+## Making recovery faster (2026-11-02)
+
+Measured on the night of 2026-11-02: 143 FactoryGame functions (9,172 bytes) recovered and matched in about
+3.5 hours, in 24 batches of about ten minutes. Compiling, linking and the hook tables take from seconds to two
+minutes of a batch; the rest is reading the disassembly and writing the C++. Those were the small functions,
+64 bytes on average; the rest of the menu path averages about 400 bytes (736 KB in 1,846 functions). At the
+same rate in bytes that is a few hundred hours for the menu milestone alone, so the gains are in the writing,
+not the building.
+
+| # | Change | What it saves |
+|---|---|---|
+| 1 | **Compile and match one file on the Mac.** UBT writes a response file for each compile; replaying it with `cl.exe` 14.38.33130 under msvc-wine compiles one unity blob without UBT or the PC | the PC round trip; matching goes on while the PC is out of reach (running the game still needs it) |
+| 2 | **Every difference, side by side.** `--match` prints the whole function aligned against the shipped one instead of the first difference, or objdiff reads the objects | a rebuild for each next difference |
+| 3 | **A decompiler draft.** Ghidra (free, reads PDBs) gives typed pseudo-C to turn into Unreal C++ | reading assembly by hand, above all for the 1,154 load-phase functions, mostly constructors setting defaults |
+| 4 | **Skeletons from the PDB.** Each function's signature, first line, locals and callees written into an empty `.cpp`, already on its lines | line bookkeeping |
+| 5 | **Systematic differences fixed once.** Whether FName `==` as two 32-bit compares comes from an engine setting or from the engine's version; class layouts compared between the game's PDB and css-83, so drifting classes are known before their functions are written | thousands of functions that compare FNames; work on functions that can never match |
+| 6 | **Parallel work by unity blob.** Files in different blobs do not change each other's inlining, so several people or sessions work at once and share one build queue | wall time |
+
+1 and 2 come first: they help people and AI sessions alike, and 1 is the only one that keeps matching going
+while the PC is unreachable.
+
+## Recovery by someone else, without AI
+
+The matcher makes it possible: a function is right when it reproduces the shipped bytes, and that takes no
+judgement. Someone else needs:
+
+- their own copy of the game (the PDBs and `Headers.zip` ship with it);
+- Coffee Stain's engine, `5.6.1-css-83` (a GitHub account linked to Epic, then the modding docs' steps);
+- Windows with Visual Studio 2022, MSVC 14.38.33130 and Windows SDK 10.0.22621;
+- this repository.
+
+Their recovered code stays on their own disks, as ours does: they start from zero (see "Sharing the work"
+above). Missing before that works:
+
+- **The build project and its scripts move here.** `stage.sh`, `place.py`, `pcbuild.sh`,
+  `rebuild-and-match.sh`, `build-hooks.sh`, the headers-only FactoryGame module and the Wwise stub live in the
+  recovered-code repository today. They are tools: they come here without recovered sources, with the owner's
+  paths and hosts (`/Volumes/SMART`, `ssh windows`, `D:\SatisfactoryRecomp`) turned into settings, and what is
+  derived from the game (the Wwise stub's sizes, `compilands.tsv`) generated from the user's own install.
+- **A how-to from zero**: the setup, then a first function, such as `UFGMenuBase::OnMenuEnterDone` (24 bytes,
+  six lines of C++).
+- **Plain `.cpp` files edited in an IDE.** Today the C++ sits in Python strings (`Specs/<File>.py`, laid out by
+  `place.py`), which suits AI sessions. For people the `.cpp` becomes the source, and `place --check` /
+  `--fix` moves each function onto its PDB lines.
+- **A patterns cookbook**: what the disassembly shows and the C++ that produces it. The rules learnt so far
+  are in the recovered-code repository's STATUS.md (`fgcheck`, the `TObjectPtr` GC barrier, `/fp:fast`, statics
+  that must not be hooked, why only matching functions are hooked).
+- **A work list to pick from**: the menu path by file and size, regenerated from the user's own traces, with
+  a way to claim a file.
+- **One command per try**: compile one file and show its differences (items 1 and 2 above).
+
+Someone sitting at the PC does not need the watcher: the desktop launchers do the same.
+
 ## To run later (the game running)
 
 The Mac is short on memory, so these wait:
