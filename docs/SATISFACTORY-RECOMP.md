@@ -181,6 +181,11 @@ of Coffee Stain's own) checks the overlay itself before any recovered code is in
 | 4 | Native main menu, with the rest of FactoryGame still stubs | The menu's C++ classes recovered |
 | 5 | Native: load a save and walk around | Most of FactoryGame recovered |
 
+**Order of work (the owner, 2026-11-02).** Windows first, up to the main menu with complete menu navigation
+running recovered code in the shipped game (steps 1, 2 and the menu part of 4, validated on Windows); then one
+Mac build to check that everything holds natively; only then the game proper (step 5). The Mac engine build is
+paused until the menu milestone.
+
 ### Step 1: where it stands (2026-11-02)
 
 Each milestone is validated on Windows first (matched against the shipped module, then run in the shipped
