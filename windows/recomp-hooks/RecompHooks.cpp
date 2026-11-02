@@ -10,10 +10,21 @@
 //   first bytes are checked against the shipped build's;
 // - in a trace build (tables made with --trace), every other function entry gets an int3; the first execution of
 //   each traps once, is written to RecompTrace.tsv, and the original byte goes back.
+// Dump mode, only when a file RecompDump.txt sits next to this DLL: 20 s after the main menu's world is up, on the
+// game thread, every property of the default object of each FactoryGame class goes to RecompCDO.tsv (`./port cdo`
+// turns it into constructor lines). Hooks and trace mode are the same with or without it.
 // Everything is logged to Recomp.log, next to the game's own log.
 
 #include "CoreMinimal.h"
+#include "Containers/Ticker.h"
+#include "Engine/Engine.h"
+#include "Engine/World.h"
+#include "Misc/CoreDelegates.h"
 #include "Modules/ModuleManager.h"
+#include "UObject/Class.h"
+#include "UObject/StructOnScope.h"
+#include "UObject/UObjectIterator.h"
+#include "UObject/UnrealType.h"
 #include "Windows/WindowsHWrapper.h"
 #include "Windows/AllowWindowsPlatformTypes.h"
 
@@ -277,6 +288,145 @@ namespace
 		RecompLog( "%ld of %u FactoryGame functions hooked", GApplied, RecompHookCount );
 	}
 
+	// --- dump mode ---
+
+	double GDumpEngineUp = 0.0;   // FPlatformTime::Seconds() at engine init
+	double GDumpMenuUp = 0.0;     // when the menu's world was first seen
+
+	FString DumpField( const FString& Text )
+	{
+		return Text.Replace( TEXT( "\\" ), TEXT( "\\\\" ) ).Replace( TEXT( "\t" ), TEXT( "\\t" ) ).Replace( TEXT( "\r" ), TEXT( "\\r" ) ).Replace( TEXT( "\n" ), TEXT( "\\n" ) );
+	}
+
+	FString CppName( const UStruct* Struct )
+	{
+		return Struct ? FString( Struct->GetPrefixCPP() ) + Struct->GetName() : FString( TEXT( "-" ) );
+	}
+
+	// One row per property: class, property, owner class, C++ type, offset, exported value. A property the class
+	// declares is always written: a struct as its difference from the struct's own default, anything else whole.
+	// An inherited one only where it differs from the parent class's default object, as its difference from it.
+	void DumpDefaults()
+	{
+		HANDLE File = OpenInLogDir( L"RecompCDO.tsv" );
+		if( File == INVALID_HANDLE_VALUE )
+		{
+			RecompLog( "dump: cannot write RecompCDO.tsv" );
+			return;
+		}
+		FString Out = TEXT( "# class\tproperty\towner\ttype\toffset\tvalue (declared: whole, a struct against its default; inherited: against the parent's default object)\n" );
+		int32 Classes = 0, Rows = 0;
+		for( TObjectIterator<UClass> It; It; ++It )
+		{
+			UClass* Class = *It;
+			if( Class->GetOutermost()->GetName() != TEXT( "/Script/FactoryGame" ) || Class->HasAnyClassFlags( CLASS_NewerVersionExists ) )
+			{
+				continue;
+			}
+			UObject* Cdo = Class->GetDefaultObject( false );
+			if( !Cdo )
+			{
+				continue;
+			}
+			UClass* Super = Class->GetSuperClass();
+			UObject* SuperCdo = Super ? Super->GetDefaultObject( false ) : nullptr;
+			++Classes;
+			for( TFieldIterator<FProperty> P( Class, EFieldIteratorFlags::IncludeSuper ); P; ++P )
+			{
+				FProperty* Prop = *P;
+				const bool Declared = Prop->GetOwnerClass() == Class;
+				const FStructProperty* AsStruct = CastField<FStructProperty>( Prop );
+				for( int32 Index = 0; Index < Prop->ArrayDim; ++Index )
+				{
+					FString Value;
+					if( Declared )
+					{
+						if( AsStruct && AsStruct->Struct )
+						{
+							FStructOnScope Default( AsStruct->Struct );
+							Prop->ExportText_Direct( Value, Prop->ContainerPtrToValuePtr<void>( Cdo, Index ), Default.GetStructMemory(), nullptr, PPF_None );
+						}
+						else
+						{
+							Prop->ExportText_InContainer( Index, Value, Cdo, nullptr, nullptr, PPF_None );
+						}
+					}
+					else if( !SuperCdo || Prop->Identical_InContainer( Cdo, SuperCdo, Index, PPF_None ) )
+					{
+						continue;
+					}
+					else
+					{
+						Prop->ExportText_InContainer( Index, Value, Cdo, SuperCdo, nullptr, PPF_None );
+					}
+					FString Name = Prop->GetName();
+					if( Prop->ArrayDim > 1 )
+					{
+						Name += FString::Printf( TEXT( "[%d]" ), Index );
+					}
+					Out += FString::Printf( TEXT( "%s\t%s\t%s\t%s\t%d\t%s\n" ), *CppName( Class ), *Name, *CppName( Prop->GetOwnerClass() ),
+						*DumpField( Prop->GetCPPType() ), Prop->GetOffset_ForInternal() + Index * Prop->GetElementSize(), *DumpField( Value ) );
+					++Rows;
+				}
+			}
+		}
+		FTCHARToUTF8 Utf8( *Out );
+		DWORD Written;
+		WriteFile( File, Utf8.Get(), Utf8.Length(), &Written, nullptr );
+		CloseHandle( File );
+		RecompLog( "dump: %d FactoryGame classes, %d properties written to RecompCDO.tsv", Classes, Rows );
+	}
+
+	bool DumpTick( float )
+	{
+		const double Now = FPlatformTime::Seconds();
+		if( GDumpMenuUp == 0.0 && GEngine )
+		{
+			for( const FWorldContext& Context : GEngine->GetWorldContexts() )
+			{
+				UWorld* World = Context.World();
+				if( Context.WorldType == EWorldType::Game && World && World->GetMapName().Contains( TEXT( "Menu" ) ) && World->HasBegunPlay() )
+				{
+					GDumpMenuUp = Now;
+					RecompLog( "dump: the menu's world (%ls) is up; dumping in 20 s", *World->GetMapName() );
+				}
+			}
+		}
+		if( GDumpMenuUp != 0.0 ? Now - GDumpMenuUp < 20.0 : Now - GDumpEngineUp < 60.0 )
+		{
+			return true;
+		}
+		if( GDumpMenuUp == 0.0 )
+		{
+			RecompLog( "dump: no menu world 60 s after engine init; dumping now" );
+		}
+		DumpDefaults();
+		return false;   // once
+	}
+
+	void StartDumpTicker()
+	{
+		GDumpEngineUp = FPlatformTime::Seconds();
+		FTSTicker::GetCoreTicker().AddTicker( FTickerDelegate::CreateStatic( &DumpTick ), 1.0f );
+	}
+
+	bool DumpAsked()
+	{
+		HMODULE Self = nullptr;
+		wchar_t Path[ MAX_PATH ];
+		if( !GetModuleHandleExW( GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, (LPCWSTR)&DumpAsked, &Self )
+			|| !GetModuleFileNameW( Self, Path, MAX_PATH ) )
+		{
+			return false;
+		}
+		if( wchar_t* Slash = wcsrchr( Path, L'\\' ) )
+		{
+			Slash[ 1 ] = 0;
+		}
+		wcscat_s( Path, L"RecompDump.txt" );
+		return GetFileAttributesW( Path ) != INVALID_FILE_ATTRIBUTES;
+	}
+
 	void OnMapped( uint32 Module, uint8* Base )
 	{
 		FRecompModule& M = RecompModules[ Module ];
@@ -377,6 +527,19 @@ extern "C" __declspec( dllexport ) int32 RecompInstall()
 		{
 			RecompLog( "error: trace mode could not start" );
 		}
+	}
+
+	if( DumpAsked() )
+	{
+		if( GEngine && GEngine->IsInitialized() )
+		{
+			StartDumpTicker();
+		}
+		else
+		{
+			FCoreDelegates::OnPostEngineInit.AddStatic( &StartDumpTicker );
+		}
+		RecompLog( "dump: RecompDump.txt found; the default objects go to RecompCDO.tsv once the menu is up" );
 	}
 
 	auto Register = (FLdrRegisterDllNotification)(void*)GetProcAddress( GetModuleHandleW( L"ntdll.dll" ), "LdrRegisterDllNotification" );

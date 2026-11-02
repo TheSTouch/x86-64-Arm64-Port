@@ -7,7 +7,7 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-from . import bench, config, decomp, games, hooks, msvc, pdb, inspect, kettle, overlay, runtime, session, steam, trace, wine
+from . import bench, cdo, config, decomp, games, hooks, msvc, pdb, inspect, kettle, overlay, runtime, session, steam, trace, wine
 from .util import Fail, free_gb, step, sysctl
 
 
@@ -174,36 +174,20 @@ def cmd_inspect(a):
 
 
 def cmd_decomp(a):
-    if a.families:
-        groups = decomp.families(a.dll, a.trace, a.source)
-        for i, g in enumerate(groups, 1):
-            print(f"family {i}: {g.kind}, {len(g.members)} functions, {g.bytes} bytes")
-            for rva, length, names, where in g.members:
-                folded = f" (+{len(names) - 1} folded at this address)" if len(names) > 1 else ""
-                print(f"  {rva:#010x} {length:>6}  {where}  {names[0]}{folded}")
-        big = [g for g in groups if len(g.members) >= 3]
-        print(f"{len(groups)} families of 2 or more: {sum(len(g.members) for g in groups)} functions, "
-              f"{sum(g.bytes for g in groups)} bytes; of 3 or more: {len(big)} families, "
-              f"{sum(len(g.members) for g in big)} functions, {sum(g.bytes for g in big)} bytes", file=sys.stderr)
-        return 0
     if a.trace:
         rows, files = decomp.trace(a.dll, a.trace)
         for r in rows:
             print(f"{r.ms:>8} {r.thread:>6} {r.rva:#010x} {r.length:>6}  {r.source or '-'}  {r.name}")
         print(f"\n{len(files)} source files, in order of first execution:")
-        for name, n, size, first, spans, span_bytes in files:
-            print(f"{first:>8} ms  {n:>5} functions {size:>8} bytes  {spans:>5} spans {span_bytes:>8} bytes  {name}")
-        print(f"{len(rows)} functions run, {sum(r.length for r in rows)} bytes; from source files: "
-              f"{sum(f[1] for f in files)} functions, {sum(f[2] for f in files)} bytes, {sum(f[4] for f in files)} "
-              f"distinct spans, {sum(f[5] for f in files)} bytes", file=sys.stderr)
+        for name, n, size, first in files:
+            print(f"{first:>8} ms  {n:>5} functions {size:>8} bytes  {name}")
+        print(f"{len(rows)} functions run, {sum(r.length for r in rows)} bytes", file=sys.stderr)
         return 0
     if a.match:
-        results = decomp.match(a.dll, a.match, a.diff or ())
+        results = decomp.match(a.dll, a.match)
         for r in results:
-            if a.diff and (r.name in a.diff or r.shipped in a.diff):
-                print(decomp.diff_listing(r))
-            if not a.diff or r.name in a.diff or r.shipped in a.diff:
-                print(decomp.match_line(r))
+            shipped = f"  [{r.shipped}]" if r.shipped else ""
+            print(f"{r.state:<8} {r.name}{shipped}" + (f": {r.detail}" if r.detail else ""))
         counts = {s: sum(r.state == s for r in results) for s in ("matched", "differs", "missing")}
         print(f"{len(results)} functions: {counts['matched']} matched, {counts['differs']} differing, "
               f"{counts['missing']} not in the shipped module", file=sys.stderr)
@@ -386,6 +370,14 @@ def _msvc_args(a):
     return cmd_msvc(a)
 
 
+def cmd_cdo(a):
+    rows, lines = cdo.draft(a.tsv, a.cls)
+    declared = sum(r.declared for r in rows)
+    print(f"// {a.cls}'s constructor, drafted from its default object ({declared} declared properties, "
+          f"{len(rows) - declared} inherited ones it changes; zero defaults left out)")
+    print("\n".join(lines))
+    return 0
+
 
 def parser():
     p = argparse.ArgumentParser(prog="port", description="Windows games on Apple Silicon: Porting Kit "
@@ -433,16 +425,9 @@ def parser():
     sp.add_argument("--type", metavar="NAME", help="a class, struct or enum: layout, members, vtable slots")
     sp.add_argument("--out", metavar="DIR", help="write functions.tsv and one .asm per function (outside this repository)")
     sp.add_argument("--match", metavar="OBJ", help="compare each function of a compiled .obj with the shipped one "
-                    "(relocated operands masked): matched, or the first difference; each line ends with a score, "
-                    "the instructions not the same once both are aligned")
-    sp.add_argument("--diff", action="append", metavar="NAME", help="with --match: this function's shipped and "
-                    "compiled disassembly side by side (decorated or shipped name; may be repeated)")
-    sp.add_argument("--families", action="store_true", help="group the game's functions (with --trace, those the "
-                    "traces ran) whose code is the same once numbers are masked, or near it (lengths within 10 %%, "
-                    "instructions 90 %% the same)")
-    sp.add_argument("--trace", nargs="+", metavar="TSV", help="name the functions of traces from the hook loader's "
-                    "trace mode (RecompTrace.tsv; each function once), and sum them by source file: functions and "
-                    "distinct source spans (template instances and copies of one inline counted once)")
+                    "(relocated operands masked): matched, or the first difference")
+    sp.add_argument("--trace", metavar="TSV", help="name the functions of a trace from the hook loader's trace mode "
+                    "(RecompTrace.tsv), and sum them by source file")
     sp.set_defaults(fn=cmd_decomp)
 
     sp = sub.add_parser("hooks", help="the tables object a hook DLL links in (windows/recomp-hooks): hooks over the "
@@ -522,6 +507,12 @@ def parser():
                     "inlining differs from the PC's)")
     sp.add_argument("-v", "--verbose", action="store_true", help="compare: list the functions that are the same too")
     sp.set_defaults(fn=_msvc_args)
+
+    sp = sub.add_parser("cdo", help="constructor-body lines from the default objects the hook loader's dump mode "
+                        "wrote (RecompCDO.tsv)")
+    sp.add_argument("tsv", help="RecompCDO.tsv")
+    sp.add_argument("--class", dest="cls", required=True, metavar="NAME", help="the class, with its prefix (UFGMenuBase)")
+    sp.set_defaults(fn=cmd_cdo)
     return p
 
 
