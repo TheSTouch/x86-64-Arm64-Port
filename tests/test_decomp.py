@@ -127,7 +127,9 @@ class DecompTest(unittest.TestCase):
         out = self.dir / "work"
         decomp.dump(self.dll, out, "\\Game\\Source\\")
         index = (out / "Game-Screen" / "functions.tsv").read_text()
+        self.assertTrue(index.startswith("name\trva\tlength\tsource\tfirst_line\tlast_line\tlocals\tmangled\tspan\n"))
         self.assertIn("FGScreen::Construct\t0x1010\t64\tScreen.cpp\t20\t27", index)
+        self.assertIn("\tD:\\Game\\Source\\Game\\Private\\Screen.cpp:20-27\n", index)  # the span, last
         self.assertTrue((out / "Game-Screen" / "Screen.cpp" / "FGScreen__Construct.asm").is_file())
 
 
@@ -147,4 +149,19 @@ class TraceTest(unittest.TestCase):
             self.assertEqual([(r.ms, r.thread, r.rva, r.name) for r in rows],
                              [(5, 100, 0x1010, "FGScreen::Construct"), (9, 200, 0x9999, "?")])
             self.assertEqual(rows[0].source, "Screen.cpp")
-            self.assertEqual(files, [("Screen.cpp", 1, 0x40, 5)])   # file, functions, bytes, first ms
+            # file, functions, bytes, first ms, distinct source spans, their bytes (each span once)
+            self.assertEqual(files, [("Screen.cpp", 1, 0x40, 5, 1, 0x40)])
+
+    def test_trace_counts_each_source_span_once(self):
+        with tempfile.TemporaryDirectory() as d:
+            dll = Path(d) / "Game-Screen-Win64-Shipping.dll"
+            dll.write_bytes(build_dll())
+            dll.with_suffix(".pdb").write_bytes(build_pdb(twin=True))
+            a, b = Path(d) / "a.tsv", Path(d) / "b.tsv"
+            a.write_text("5\t100\t00001010\n")
+            b.write_text("3\t100\t00001050\n7\t100\t00001010\n")   # two traces: 0x1010 counted once
+            rows, files = decomp.trace(dll, [a, b])
+            self.assertEqual([r.rva for r in rows], [0x1010, 0x1050])
+            self.assertEqual(rows[1].span, "D:\\Game\\Source\\Game\\Private\\Screen.cpp:20-27")
+            # FGScreen::Construct and TScreen<int>::Construct come from the same lines: 2 functions, 1 span
+            self.assertEqual(files, [("Screen.cpp", 2, 0x60, 5, 1, 0x40)])

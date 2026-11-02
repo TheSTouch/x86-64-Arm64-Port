@@ -273,6 +273,12 @@ def _safe(name):
     return re.sub(r"[^A-Za-z0-9_.-]+", "_", name.replace("::", "__")).strip("_")[:120] or "anonymous"
 
 
+def span(f):
+    """Where a function comes from: "<source file>:<first line>-<last line>". Template instances and copies of
+    one inline function share it; None without line info."""
+    return f"{f.source}:{f.first_line}-{f.last_line}" if f.source else None
+
+
 def dump(dll, out, source_marker=None):
     """One folder per module, holding functions.tsv and one .asm per game function, by source file."""
     if config.inside_repository(out):
@@ -281,11 +287,11 @@ def dump(dll, out, source_marker=None):
     module = re.sub(r"-Win64-(Shipping|Test|Development)$", "", Path(dll).stem)
     root = Path(out) / module
     root.mkdir(parents=True, exist_ok=True)
-    rows = ["name\trva\tlength\tsource\tfirst_line\tlast_line\tlocals\tmangled"]
+    rows = ["name\trva\tlength\tsource\tfirst_line\tlast_line\tlocals\tmangled\tspan"]
     for f in (fns := m.game_functions(source_marker)):
         source = Path(f.source.replace("\\", "/")).name
         rows.append("\t".join([f.name, f"{m.rva(f.segment, f.offset):#x}", str(f.length), source,
-                               str(f.first_line), str(f.last_line), ",".join(f.locals), f.mangled or ""]))
+                               str(f.first_line), str(f.last_line), ",".join(f.locals), f.mangled or "", span(f)]))
         folder = root / source
         folder.mkdir(exist_ok=True)
         target = folder / f"{_safe(f.name)}.asm"
@@ -304,30 +310,36 @@ class TraceRow:
     name: str
     source: str = ""
     length: int = 0
+    span: str = None
 
 
-def trace(dll, tsv):
-    """A trace written by the hook loader's trace mode (RecompTrace.tsv: ms, thread, rva of each function's first
-    execution), with each function's name and source file; and by source file, in order of first execution:
-    (file, functions run, their bytes, first ms)."""
+def trace(dll, tsvs):
+    """Traces written by the hook loader's trace mode (RecompTrace.tsv: ms, thread, rva of each function's first
+    execution; one path or several), each function once, in the order the traces give, with its name, source
+    file and span; and by source file, in order of first execution: (file, functions run, their bytes, first
+    ms, distinct source spans, their bytes with each span counted once, at its largest function)."""
     m = Module(dll)
     by_rva = {}
     for f in m.functions:
         by_rva.setdefault(m.rva(f.segment, f.offset), f)
-    rows, files = [], {}
-    for line in Path(tsv).read_text(encoding="utf-8", errors="replace").splitlines():
-        parts = line.split("\t")
-        if line.startswith("#") or len(parts) < 3:
-            continue
-        ms, thread, rva = int(parts[0]), int(parts[1]), int(parts[2], 16)
-        f = by_rva.get(rva)
-        source = Path(f.source.replace("\\", "/")).name if f and f.source else ""
-        rows.append(TraceRow(ms, thread, rva, f.name if f else "?", source, f.length if f else 0))
-        if source:
-            n, size, first = files.get(source, (0, 0, ms))
-            files[source] = (n + 1, size + rows[-1].length, first)
+    rows, files, seen = [], {}, set()
+    for tsv in [tsvs] if isinstance(tsvs, (str, Path)) else tsvs:
+        for line in Path(tsv).read_text(encoding="utf-8", errors="replace").splitlines():
+            parts = line.split("\t")
+            if line.startswith("#") or len(parts) < 3 or (rva := int(parts[2], 16)) in seen:
+                continue
+            seen.add(rva)
+            ms, thread, f = int(parts[0]), int(parts[1]), by_rva.get(rva)
+            source = Path(f.source.replace("\\", "/")).name if f and f.source else ""
+            rows.append(TraceRow(ms, thread, rva, f.name if f else "?", source, f.length if f else 0,
+                                 span(f) if f else None))
+            if source:
+                entry = files.setdefault(source, [0, 0, ms, {}])
+                entry[0], entry[1] = entry[0] + 1, entry[1] + rows[-1].length
+                key = rows[-1].span or rva
+                entry[3][key] = max(entry[3].get(key, 0), rows[-1].length)
     ordered = sorted(files.items(), key=lambda kv: kv[1][2])
-    return rows, [(name, n, size, first) for name, (n, size, first) in ordered]
+    return rows, [(name, n, size, first, len(spans), sum(spans.values())) for name, (n, size, first, spans) in ordered]
 
 
 @dataclass

@@ -56,10 +56,11 @@ def info_stream(names_stream):
     return out
 
 
-def build_pdb(folded=False, fields=False):
+def build_pdb(folded=False, fields=False, twin=False):
     """Stream 5 is the module, 6 the symbol records (publics), 7 /names. folded: a second function at
     FGScreen::Construct's address, with its own line subsection after Construct's. fields: Construct's typed
-    locals and where they live (FIELDS_CODE)."""
+    locals and where they live (FIELDS_CODE). twin: TScreen<int>::Construct at 0x50 (0x20 bytes), from the
+    same lines as FGScreen::Construct (a template instance)."""
     files = b"\0D:\\Game\\Source\\Game\\Private\\Screen.cpp\0D:\\Engine\\Core\\Array.h\0"
     names = struct.pack("<III", 0xEFFEEFFE, 1, len(files)) + files
     # module stream: signature, then symbols, then C13 line info
@@ -92,6 +93,11 @@ def build_pdb(folded=False, fields=False):
     syms += proc + body + rec(0x0006, b"")
     syms += rec(0x110F, struct.pack("<IIIIIIIIHB", 0, 0, 0, 0x8, 0, 8, 0, 0x60, 1, 0) + b"`anonymous'::Helper\0")
     syms += rec(0x0006, b"")
+    if twin:
+        end_at = len(syms) + len(rec(0x110F, b"\0" * 35 + b"TScreen<int>::Construct\0"))
+        syms += rec(0x110F, struct.pack("<IIIIIIIIHB", 0, end_at, 0, 0x20, 0, 0x20, 0, 0x50, 1, 0)
+                    + b"TScreen<int>::Construct\0")
+        syms += rec(0x0006, b"")
     if folded:
         end_at = len(syms) + len(rec(0x110F, b"\0" * 35 + b"FGScreen::Folded\0"))
         syms += rec(0x110F, struct.pack("<IIIIIIIIHB", 0, end_at, 0, 0x40, 0, 0x40, 0, 0x10, 1, 0) + b"FGScreen::Folded\0")
@@ -108,6 +114,10 @@ def build_pdb(folded=False, fields=False):
     c13 = struct.pack("<II", 0xF4, len(checksums)) + checksums + struct.pack("<II", 0xF2, len(lines)) + lines
     if folded:
         c13 += struct.pack("<II", 0xF2, len(lines2)) + lines2
+    if twin:
+        lines3 = struct.pack("<IHHI", 0x50, 1, 0, 0x20) + struct.pack("<III", 0, 2, 12 + 2 * 8)
+        lines3 += struct.pack("<II", 0, 20) + struct.pack("<II", 8, 27)
+        c13 += struct.pack("<II", 0xF2, len(lines3)) + lines3
     c13 += struct.pack("<II", 0xF6, len(inlinees)) + inlinees
     module = syms + c13
     # DBI: header, one module info record

@@ -179,9 +179,11 @@ def cmd_decomp(a):
         for r in rows:
             print(f"{r.ms:>8} {r.thread:>6} {r.rva:#010x} {r.length:>6}  {r.source or '-'}  {r.name}")
         print(f"\n{len(files)} source files, in order of first execution:")
-        for name, n, size, first in files:
-            print(f"{first:>8} ms  {n:>5} functions {size:>8} bytes  {name}")
-        print(f"{len(rows)} functions run, {sum(r.length for r in rows)} bytes", file=sys.stderr)
+        for name, n, size, first, spans, span_bytes in files:
+            print(f"{first:>8} ms  {n:>5} functions {size:>8} bytes  {spans:>5} spans {span_bytes:>8} bytes  {name}")
+        print(f"{len(rows)} functions run, {sum(r.length for r in rows)} bytes; from source files: "
+              f"{sum(f[1] for f in files)} functions, {sum(f[2] for f in files)} bytes, {sum(f[4] for f in files)} "
+              f"distinct spans, {sum(f[5] for f in files)} bytes", file=sys.stderr)
         return 0
     if a.match:
         results = decomp.match(a.dll, a.match, a.diff or ())
@@ -328,8 +330,9 @@ def parser():
                     "the instructions not the same once both are aligned")
     sp.add_argument("--diff", action="append", metavar="NAME", help="with --match: this function's shipped and "
                     "compiled disassembly side by side (decorated or shipped name; may be repeated)")
-    sp.add_argument("--trace", metavar="TSV", help="name the functions of a trace from the hook loader's trace mode "
-                    "(RecompTrace.tsv), and sum them by source file")
+    sp.add_argument("--trace", nargs="+", metavar="TSV", help="name the functions of traces from the hook loader's "
+                    "trace mode (RecompTrace.tsv; each function once), and sum them by source file: functions and "
+                    "distinct source spans (template instances and copies of one inline counted once)")
     sp.set_defaults(fn=cmd_decomp)
 
     sp = sub.add_parser("hooks", help="the tables object a hook DLL links in (windows/recomp-hooks): hooks over the "
