@@ -238,12 +238,19 @@ FactoryGame.dll (15 MB) cannot be swapped whole, so its functions are replaced o
 - **Recovering FactoryGame (2026-11-02).** Functions compile in the shipped build's unity blob (the PDB names each
   function's `Module.FactoryGame.<n>.cpp`): what the shipped build inlined from another file of its blob is only inlined
   here if that file's function is recovered too. Coffee Stain's checks are `fgcheck` (the CSS engine's FG_CHECK_IMPL).
-  By the morning of 2026-11-02: 64 FactoryGame functions hooked (FGGameInstance, FGGameUserSettings, FGLocalPlayer,
-  FGGameEngine, FGGameMode, FGGameSession...), 52 of them matching byte for byte; each batch ran in the shipped game
-  through the watcher (menu, Options, exit, no error). The counters live in the recovered-code repository's STATUS.md.
+  By the morning of 2026-11-02: 134 FactoryGame functions hooked, every one matching byte for byte (game instance,
+  user settings, local player, game engine and game mode, game session, the menus' own widgets (menu base, widget
+  switcher, button hints, base UI and their constructors), player input, save system, settings apply types...).
+  Each batch ran in the shipped game through the watcher: the full menu navigation (every Options tab, New Game's
+  panels, Load with its saves listed, Credits, Exit), no error. The counters live in the recovered-code repository's
+  STATUS.md.
+- **Only matching functions are hooked.** One that differs may use other field offsets than the game: css-83's
+  UInstancedStaticMeshComponent is laid out differently from the game's engine, so a recovered
+  UFGFoliageInstancedSMC::ShouldCreatePhysicsState reads its flag at +0xbb0 where the game has it at +0xb68.
+  `./port hooks --skip` takes the functions the last matching run reported as differing.
 - **What does not match** is recorded with its evidence: inlining decisions of a smaller translation unit (an engine
-  template the shipped build called, inlined here), and engine drift (FName == compares the two halves separately in
-  the shipped build, one 64-bit compare in css-83).
+  template or a function of the same blob that the shipped build called, inlined here), and engine drift (FName ==
+  compares the two halves separately in the shipped build; a class laid out differently).
 - **Trace mode.** Tables made with `--trace` also list every FactoryGame function; the loader puts an int3 on each
   entry, and the first execution of each traps once, is written to `RecompTrace.tsv` and runs on (74,064 entries armed
   in 2 s; the menu loads as fast). `./port decomp <dll> --trace <tsv>` names them. Three traces, launch to the main menu
