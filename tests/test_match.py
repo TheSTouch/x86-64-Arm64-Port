@@ -153,6 +153,19 @@ class MatchTest(unittest.TestCase):
         self.assertTrue(decomp.match_line(r).endswith(" score 1"))
 
     @unittest.skipUnless(shutil.which("objdump"), "needs objdump (Xcode command line tools)")
+    def test_matched_scores_zero_with_its_listing_too(self):
+        # the lea's displacement resolved by the assembler (no relocation), the shipped one masked as
+        # rip-relative: the listing shows the line as changed, the bytes match all the same
+        body = bytearray(shipped_body())
+        obj = self.dir / "Screen.cpp.obj"
+        data = bytearray(build_dll())
+        body[9:13] = data[0x419:0x41d]
+        obj.write_bytes(build_obj([(CONSTRUCT, bytes(body), [(2, 4)])]))
+        (r,) = decomp.match(self.dll, obj, diff=[CONSTRUCT])
+        self.assertEqual((r.state, r.score), ("matched", 0))
+        self.assertIn("!", [row[0] for row in r.rows])
+
+    @unittest.skipUnless(shutil.which("objdump"), "needs objdump (Xcode command line tools)")
     def test_a_changed_instruction_scores_one(self):
         body = bytearray(shipped_body())
         body[8] = 0x15          # lea rdx instead of lea rcx

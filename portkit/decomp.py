@@ -523,7 +523,9 @@ def _align(m, pairs):
             rows += [("!", a, b) for a, b in zip(left[:n], right[:n])]
             rows += [("<", a, None) for a in left[n:]] + [(">", None, b) for b in right[n:]]
         r.rows, r.score = rows, sum(mark != "=" for mark, *_ in rows)
-        if r.state == "differs" and not r.score:
+        if r.state == "matched":
+            r.score = 0  # the bytes decide: a listing may show an operand only one side relocates
+        elif not r.score:
             r.score = 1  # bytes differ where the text does not (another encoding of the same instruction)
 
 
