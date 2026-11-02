@@ -295,11 +295,42 @@ def cmd_trace(a):
 def cmd_msvc(a):
     if a.action == "cl":
         return msvc.cl(a.args).returncode
+    if a.action == "flags":
+        obj = Path(a.obj)
+        info = msvc.build_info(obj.read_bytes())
+        for name in msvc.BUILDINFO_FIELDS[:-1]:
+            print(f"{name:<9} {getattr(info, name) or '(not recorded: /experimental:deterministic leaves it out)'}")
+        print(f"{'recorded':<9} {info.command}")
+        rsp = Path(a.rsp) if a.rsp else None
+        if rsp is None:
+            module = obj.parent.name if obj.parent.name in msvc.SHIPPED else "FactoryGameRecomp"
+            guess = msvc.PathMap(".").mirrored(msvc.intermediate(module)) / (obj.name + ".rsp")
+            rsp = guess if guess.is_file() else None
+        if rsp is None:
+            print("no response file (--rsp, or ./port msvc mirror): the include directories, definitions and forced "
+                  "includes are not in the object", file=sys.stderr)
+            return 0
+        m = msvc.PathMap(".")
+        cmd = msvc.Command.parse(msvc.split_args(msvc.read_pc_text(rsp)), read=lambda p: msvc.read_pc_text(m.mac(p)))
+        print(f"{'response':<9} {rsp}: {len(cmd.items)} arguments, {len(cmd.values('/I'))} include directories, "
+              f"{len(cmd.values('/external:I'))} external, {len(cmd.values('/FI'))} forced includes, "
+              f"{sum(o is not None and o.startswith('/D') for o, _ in cmd.items)} definitions")
+        missing = msvc.missing_flags(info.command, cmd)
+        print(f"{'check':<9} " + (f"recorded but not in the response file: {' '.join(missing)}" if missing
+                                  else "every recorded flag is in the response file"))
+        if a.args_out:
+            print("\n".join(cmd.lines()))
+        return 1 if missing else 0
     return 0
 
 
 def _msvc_args(a):
     """The positional ARGs of `msvc`, by action."""
+    want = {"flags": 1}
+    if a.action in want and len(a.args) != want[a.action]:
+        raise Fail(f"usage: ./port msvc {a.action} " + " ".join(["OBJ"] * want[a.action]))
+    if a.action == "flags":
+        a.obj = a.args[0]
     return cmd_msvc(a)
 
 
@@ -421,9 +452,11 @@ def parser():
 
     sp = sub.add_parser("msvc", help="MSVC 14.38 under Wine: the PC's compiles replayed on the Mac, one unity "
                         "blob compiled and matched without UBT")
-    sp.add_argument("action", choices=["cl"],
-                    help="cl: run cl.exe with ARGS")
-    sp.add_argument("args", nargs="*", metavar="ARG", help="cl: its arguments")
+    sp.add_argument("action", choices=["cl", "flags"],
+                    help="cl: run cl.exe with ARGS; flags: the command line an object records, and its response file's")
+    sp.add_argument("args", nargs="*", metavar="ARG", help="cl: its arguments; flags: OBJ")
+    sp.add_argument("--rsp", metavar="FILE", help="flags: the response file (default: the mirrored one of the same name)")
+    sp.add_argument("--args", dest="args_out", action="store_true", help="flags: print the response file's arguments")
     sp.set_defaults(fn=_msvc_args)
     return p
 
