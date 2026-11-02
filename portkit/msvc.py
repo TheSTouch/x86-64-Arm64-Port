@@ -35,6 +35,8 @@ BUILDINFO_FIELDS = ("cwd", "compiler", "source", "pdb", "command")   # CV_BuildI
 SEPARATE = {"/i", "/external:i", "/experimental:log", "/sourcedependencies"}
 JOINED_PATHS = ("/FI", "/Yu", "/Yc", "/Fp", "/Fo")
 # Dropped on the Mac: the SARIF log; without a PCH (pch=False) also /Yu and /Fp, its header staying forced with /FI.
+DROPPED = ("/experimental:log",)
+PCH_FLAGS = ("/Yu", "/Yc", "/Fp")
 SHIPPED = {"FactoryGameRecomp": "FactoryGame", "FactoryPreEarlyLoadingScreen": "FactoryPreEarlyLoadingScreen"}
 
 
@@ -404,3 +406,177 @@ def check_engine(deps, m):
             differing.append(f"differs: {path}")
     return {"engine_files": len(files), "identical": same, "line_endings": endings, "different": differ,
             "absent": absent, "differing": differing}
+
+
+# ---------------------------------------------------------------------------------------------- compiling
+
+def patch_definitions(text, hooks=False):
+    """A module's Definitions header for a matching compile (RECOMP_HOOKS 0) or a hook compile (1), whatever
+    the PC's last build was."""
+    return re.sub(r"^#define RECOMP_HOOKS \d+", f"#define RECOMP_HOOKS {1 if hooks else 0}", text, flags=re.M)
+
+
+def blob_name(target, project, module="FactoryGameRecomp"):
+    """A blob number (101), a blob (Module.FactoryGame.101.cpp) or a recovered file (FGFoo.cpp) to its blob; a
+    file of the module itself (RecompHooks.cpp) stays itself."""
+    target = Path(str(target)).name
+    if target.isdigit():
+        return f"Module.FactoryGame.{target}.cpp"
+    if target.startswith("Module."):
+        return target if target.endswith(".cpp") else target + ".cpp"
+    if (Path(project) / "Source" / module / "Private" / target).is_file():
+        return target
+    recovered = Path(project) / "Source" / module / "Private" / "Recovered"
+    for blob in sorted(recovered.glob("*.cpp")):
+        if f'#include "{target}"' in blob.read_text(encoding="utf-8", errors="replace"):
+            return blob.name
+    raise Fail(f"{target}: in no blob of {recovered} (is it staged?)")
+
+
+def response_file(module, source_name):
+    """The PC's response file for one compile; for a blob the PC has not compiled yet, a sibling's with the
+    names changed (UBT writes them all alike)."""
+    local = PathMap(".").mirrored(intermediate(module))
+    rsp = local / f"{source_name}.obj.rsp"
+    if rsp.is_file():
+        return read_pc_text(rsp)
+    for sibling in sorted(local.glob("Module.*.cpp.obj.rsp")):
+        return read_pc_text(sibling).replace(sibling.name[:-len(".obj.rsp")], source_name)
+    raise Fail(f"no response file for {source_name} in {local}: run ./port msvc mirror first")
+
+
+def command_for(project, module, source_name, out_dir, hooks=False, mapper=None, text=None, pch=None):
+    """The Mac compile of one source: the PC's response file with its paths mapped, the definitions patched for
+    this kind of build, the object written to out_dir. pch: the PCH built on the Mac (`build_pch`) for /Fp, or
+    None to compile without one (its header is forced with /FI either way)."""
+    m = mapper or PathMap(project)
+    work = Path(out_dir)
+    work.mkdir(parents=True, exist_ok=True)
+    cmd = Command.parse(split_args(text if text is not None else response_file(module, source_name)),
+                        read=lambda p: read_pc_text(m.mac(p)))
+    items = []
+    for o, v in cmd.items:
+        if o is not None and (o in DROPPED or (o in PCH_FLAGS and pch is None)):
+            continue
+        if o == "/Fp":
+            v = wine_path(pch)
+        elif o is None:
+            v = wine_path(m.mac(v))
+        elif o == "/Fo":
+            v = wine_path(work / f"{source_name}.obj")
+        elif o.lower() == "/sourcedependencies":
+            v = wine_path(work / f"{source_name}.dep.json")
+        elif o == "/FI" and Path(v.replace("\\", "/")).name.startswith("Definitions."):
+            defs = work / Path(v.replace("\\", "/")).name
+            defs.write_text(patch_definitions(read_pc_text(m.mac(v)), hooks), encoding="utf-8")
+            v = wine_path(defs)
+        elif v is not None:
+            v = wine_path(m.mac(v))
+        items.append([o, v])
+    return Command(items)
+
+
+@dataclass
+class Compiled:
+    source: str
+    obj: Path
+    seconds: float
+    ok: bool
+    output: str
+
+
+def pch_of(module, source_name):
+    """The PC path of the PCH a compile uses (its /Fp), or None."""
+    fp = Command.parse(split_args(response_file(module, source_name)), read=lambda p: "").values("/Fp")
+    return fp[0] if fp else None
+
+
+def build_pch(pc_pch, rebuild=False):
+    """The shared PCH compiled on the Mac from the PC's own response file for it (mirrored beside its header),
+    once: compiling with the PCH's header forced but no PCH changes some inlining (FKey::operator= is inlined
+    with the PCH, called without). Kept in config.MSVC_MIRROR/work/pch, rebuilt when the mirror is newer."""
+    m = PathMap(".")
+    rsp_pc = re.sub(r"\.pch$", ".obj.rsp", m.pc(pc_pch))
+    rsp = m.mirrored(rsp_pc)
+    work = config.MSVC_MIRROR / "work" / "pch"
+    work.mkdir(parents=True, exist_ok=True)
+    pch = work / Path(m.pc(pc_pch)).name
+    if pch.is_file() and not rebuild and pch.stat().st_mtime > rsp.stat().st_mtime:
+        return pch
+    step(f"Building the shared PCH on the Mac: {pch.name}")
+    cmd = Command.parse(split_args(read_pc_text(rsp)))
+    items = []
+    for o, v in cmd.items:
+        if o is not None and o in DROPPED:
+            continue
+        if o == "/Yc":
+            pass   # the header's name as the .cpp includes it, not a path
+        elif o == "/Fp":
+            v = wine_path(pch)
+        elif o == "/Fo":
+            v = wine_path(work / (pch.stem + ".obj"))
+        elif o is not None and o.lower() == "/sourcedependencies":
+            v = wine_path(work / (pch.stem + ".dep.json"))
+        elif v is not None:
+            v = wine_path(m.mac(v))
+        items.append([o, v])
+    local_rsp = work / (pch.stem + ".rsp")
+    local_rsp.write_text("\n".join(Command(items).lines()) + "\n", encoding="utf-8")
+    log = work / (pch.stem + ".log")
+    started = time.monotonic()
+    r = cl(["@" + wine_path(local_rsp)], output=log)
+    if r.returncode or not pch.is_file():
+        raise Fail(f"the PCH did not build ({log}):\n" + log.read_text(encoding="utf-8", errors="replace")[-3000:])
+    step(f"PCH built in {time.monotonic() - started:.0f} s")
+    return pch
+
+
+def compile_one(project, module, source_name, out_dir, hooks=False, pch=True):
+    started = time.monotonic()
+    local_pch = None
+    if pch and (pc_pch := pch_of(module, source_name)):
+        local_pch = build_pch(pc_pch)
+    cmd = command_for(project, module, source_name, out_dir, hooks, pch=local_pch)
+    rsp = Path(out_dir) / f"{source_name}.rsp"
+    rsp.write_text("\n".join(cmd.lines()) + "\n", encoding="utf-8")
+    obj = Path(out_dir) / f"{source_name}.obj"
+    if obj.exists():
+        obj.unlink()
+    log = Path(out_dir) / f"{source_name}.log"
+    r = cl(["@" + wine_path(rsp)], output=log)
+    output = "\n".join(line for line in log.read_text(encoding="utf-8", errors="replace").splitlines()
+                       if line.strip() and line.strip() != source_name)
+    return Compiled(source_name, obj, time.monotonic() - started, r.returncode == 0 and obj.is_file(), output)
+
+
+def compile_many(project, module, sources, out_dir, hooks=False, jobs=2, pch=True):
+    if pch:   # built once, before the parallel compiles
+        for pc_pch in {p for s in sources if (p := pch_of(module, s))}:
+            build_pch(pc_pch)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, jobs)) as pool:
+        return list(pool.map(lambda s: compile_one(project, module, s, out_dir, hooks, pch), sources))
+
+
+def shipped_dll(module):
+    name = SHIPPED.get(module, module)
+    return config.GAME_BINARIES / f"{config.PC_TARGET}-{name}-Win64-Shipping.dll"
+
+
+# ---------------------------------------------------------------------------------------------- comparing objects
+
+def compare_objects(a, b):
+    """Two compiles of the same source, function by function: (name, state), state same, differs, only-a or
+    only-b. Bytes a relocation fills in either are masked. A compile without the PCH also holds what the PCH's
+    object holds otherwise: the static initializers and inline functions of the PCH's headers."""
+    fa = {f.name: f for f in coff.parse(Path(a).read_bytes()).functions()}
+    fb = {f.name: f for f in coff.parse(Path(b).read_bytes()).functions()}
+    out = []
+    for name in sorted(fa.keys() | fb.keys()):
+        if name not in fa or name not in fb:
+            out.append((name, "only-a" if name in fa else "only-b"))
+            continue
+        x, y = fa[name], fb[name]
+        masked = x.masked | y.masked
+        same = len(x.code) == len(y.code) and all(x.code[i] == y.code[i] for i in range(len(x.code)) if i not in masked)
+        out.append((name, "same" if same else "differs"))
+    return out

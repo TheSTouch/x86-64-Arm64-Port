@@ -333,16 +333,56 @@ def cmd_msvc(a):
                 print("  " + line)
             return 1 if report["different"] or report["absent"] else 0
         return 0
+    if a.action == "compare":
+        rows = msvc.compare_objects(a.obj, a.other)
+        for name, state in rows:
+            if state in ("differs", "only-a") or a.verbose:
+                print(f"{state:<8} {name}")
+        n = {s: sum(r == s for _, r in rows) for s in ("same", "differs", "only-a", "only-b")}
+        print(f"{n['same'] + n['differs']} functions in both: {n['same']} with the same code, {n['differs']} not; "
+              f"{n['only-a']} only in the first, {n['only-b']} only in the second", file=sys.stderr)
+        return 1 if n["differs"] or n["only-a"] else 0
+    if a.action == "match":
+        project = Path(a.project)
+        sources = [msvc.blob_name(t, project, a.module) for t in a.targets]
+        out = Path(a.out) if a.out else config.MSVC_BUILDS / project.name / a.module
+        if config.inside_repository(out):
+            raise Fail(f"{out} is inside this repository; objects compiled from recovered code stay outside it")
+        results = msvc.compile_many(project, a.module, sources, out, hooks=a.hooks, jobs=a.jobs, pch=not a.no_pch)
+        dll = msvc.shipped_dll(a.module)
+        differs = failed = 0
+        for c in results:
+            print(f"compiled {c.source} in {c.seconds:.0f} s" if c.ok else f"FAILED   {c.source} ({c.seconds:.0f} s)",
+                  file=sys.stderr)
+            if not c.ok:
+                failed += 1
+                print(c.output, file=sys.stderr)
+                continue
+            if a.no_match:
+                continue
+            for r in decomp.match(dll, c.obj):
+                if r.state == "missing":
+                    continue
+                shipped = f"  [{r.shipped}]" if r.shipped else ""
+                print(f"{r.state:<8} {r.name}{shipped}" + (f": {r.detail}" if r.detail else ""))
+                differs += r.state == "differs"
+        return 1 if failed or differs else 0
     return 0
 
 
 def _msvc_args(a):
     """The positional ARGs of `msvc`, by action."""
-    want = {"flags": 1}
+    want = {"flags": 1, "compare": 2}
     if a.action in want and len(a.args) != want[a.action]:
         raise Fail(f"usage: ./port msvc {a.action} " + " ".join(["OBJ"] * want[a.action]))
     if a.action == "flags":
         a.obj = a.args[0]
+    elif a.action == "compare":
+        a.obj, a.other = a.args
+    elif a.action == "match":
+        if len(a.args) < 2:
+            raise Fail("usage: ./port msvc match STAGED_PROJECT BLOB|File.cpp [...]")
+        a.project, a.targets = a.args[0], a.args[1:]
     return cmd_msvc(a)
 
 
@@ -464,13 +504,23 @@ def parser():
 
     sp = sub.add_parser("msvc", help="MSVC 14.38 under Wine: the PC's compiles replayed on the Mac, one unity "
                         "blob compiled and matched without UBT")
-    sp.add_argument("action", choices=["cl", "flags", "mirror"],
-                    help="cl: run cl.exe with ARGS; flags: the command line an object records, and its response file's; mirror: fetch what only the PC has")
-    sp.add_argument("args", nargs="*", metavar="ARG", help="cl: its arguments; flags: OBJ")
+    sp.add_argument("action", choices=["cl", "flags", "mirror", "match", "compare"],
+                    help="cl: run cl.exe with ARGS; flags: the command line an object records, and its response "
+                    "file's; mirror: fetch what only the PC has; match: compile blobs of a staged project and match "
+                    "them; compare: two objects' code, function by function")
+    sp.add_argument("args", nargs="*", metavar="ARG", help="cl: its arguments; flags: OBJ; compare: OBJ OBJ; "
+                    "match: STAGED_PROJECT then blob numbers, blob names or recovered File.cpp names")
     sp.add_argument("--rsp", metavar="FILE", help="flags: the response file (default: the mirrored one of the same name)")
     sp.add_argument("--args", dest="args_out", action="store_true", help="flags: print the response file's arguments")
     sp.add_argument("--module", default="FactoryGameRecomp", help="the build module (default: %(default)s)")
     sp.add_argument("--no-check", action="store_true", help="mirror: do not hash the engine headers on both sides")
+    sp.add_argument("--hooks", action="store_true", help="match: compile as the hook build (RECOMP_HOOKS=1)")
+    sp.add_argument("--jobs", type=int, default=2, help="match: parallel compiles (default: %(default)s)")
+    sp.add_argument("--out", metavar="DIR", help="match: where the objects go (default: under config.MSVC_BUILDS)")
+    sp.add_argument("--no-match", action="store_true", help="match: compile only")
+    sp.add_argument("--no-pch", action="store_true", help="match: no PCH, its header forced (faster to start, but some "
+                    "inlining differs from the PC's)")
+    sp.add_argument("-v", "--verbose", action="store_true", help="compare: list the functions that are the same too")
     sp.set_defaults(fn=_msvc_args)
     return p
 

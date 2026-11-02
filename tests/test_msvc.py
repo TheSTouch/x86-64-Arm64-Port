@@ -103,6 +103,31 @@ class ResponseFileTest(unittest.TestCase):
         cmd = msvc.Command.parse(msvc.split_args(self.RSP), read=lambda p: self.SHARED)
         self.assertEqual(msvc.missing_flags("-Ox -X", cmd), [])
 
+    def test_the_mac_command(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            m = msvc.PathMap(tmp / "project", mirror=tmp / "mirror", engine=tmp / "engine", msvc=tmp / "msvc")
+            defs = m.mac("D:/P/Intermediate/Build/M/Definitions.M.h")
+            defs.parent.mkdir(parents=True)
+            defs.write_text("#define WITH_CHEATS 1\n#define RECOMP_HOOKS 1\n")
+            shared = m.mac("D:/P/Intermediate/Build/M/M.Shared.rsp")
+            shared.write_text(self.SHARED)
+            saved = config.PC_PROJECT
+            config.PC_PROJECT = "D:/P"
+            try:
+                m = msvc.PathMap(tmp / "project", mirror=tmp / "mirror", engine=tmp / "engine", msvc=tmp / "msvc")
+                cmd = msvc.command_for(tmp / "project", "M", "Module.FactoryGame.101.cpp", tmp / "out", mapper=m,
+                                       text=self.RSP)
+            finally:
+                config.PC_PROJECT = saved
+            lines = cmd.lines()
+            self.assertFalse([x for x in lines if x.startswith(("/Yu", "/Fp", "/experimental:log"))])
+            self.assertIn(f'/Fo"{msvc.wine_path(tmp / "out" / "Module.FactoryGame.101.cpp.obj")}"', lines)
+            self.assertIn(f'/FI"{msvc.wine_path(tmp / "out" / "Definitions.M.h")}"', lines)
+            self.assertIn("RECOMP_HOOKS 0", (tmp / "out" / "Definitions.M.h").read_text())
+            self.assertEqual(lines[0], msvc.wine_path(tmp / "project" / "Source/M/Private/Recovered/Module.FactoryGame.101.cpp"))
+            self.assertIn(f'/I {msvc.quote(msvc.wine_path(tmp / "engine" / "Engine" / "Source"))}', lines)
+
 
 class PathMapTest(unittest.TestCase):
     def setUp(self):
@@ -129,6 +154,36 @@ class PathMapTest(unittest.TestCase):
     def test_an_unknown_root(self):
         with self.assertRaises(Fail):
             self.m.mac("E:/elsewhere/x.h")
+
+
+class BlobTest(unittest.TestCase):
+    def test_numbers_names_and_recovered_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            rec = Path(tmp) / "Source/FactoryGameRecomp/Private/Recovered"
+            rec.mkdir(parents=True)
+            (rec / "Module.FactoryGame.107.cpp").write_text('#include "FGGameMode.cpp"\n#include "FGMenuBase.cpp"\n')
+            self.assertEqual(msvc.blob_name("101", tmp), "Module.FactoryGame.101.cpp")
+            self.assertEqual(msvc.blob_name("Module.FactoryGame.99.cpp", tmp), "Module.FactoryGame.99.cpp")
+            self.assertEqual(msvc.blob_name("FGMenuBase.cpp", tmp), "Module.FactoryGame.107.cpp")
+            with self.assertRaises(Fail):
+                msvc.blob_name("FGNotThere.cpp", tmp)
+
+    def test_definitions_for_either_build(self):
+        text = "#define A 1\n#define RECOMP_HOOKS 1\n"
+        self.assertIn("#define RECOMP_HOOKS 0", msvc.patch_definitions(text))
+        self.assertIn("#define RECOMP_HOOKS 1", msvc.patch_definitions(text.replace(" 1\n", " 0\n"), hooks=True))
+
+
+class CompareTest(unittest.TestCase):
+    def test_same_code_but_relocations(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            a, b = Path(tmp) / "a.obj", Path(tmp) / "b.obj"
+            a.write_bytes(obj_with({"f": (b"\xe8\x01\x02\x03\x04\xc3", [1]), "g": (b"\x31\xc0\xc3", []),
+                                    "h": (b"\xc3", [])}))
+            b.write_bytes(obj_with({"f": (b"\xe8\x00\x00\x00\x00\xc3", [1]), "g": (b"\x33\xc0\xc3", []),
+                                    "pch": (b"\xc3", [])}))
+            self.assertEqual(dict(msvc.compare_objects(a, b)),
+                             {"f": "same", "g": "differs", "h": "only-a", "pch": "only-b"})
 
 
 if __name__ == "__main__":
