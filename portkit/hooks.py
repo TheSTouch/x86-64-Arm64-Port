@@ -133,7 +133,10 @@ def plan(recovered, others, modules):
                 continue
             seen.add(name)
             rva, length, source = game.functions[name]
-            if not source.lower().endswith(".cpp"):
+            if name.startswith(("??__E", "??__F")):
+                p.skipped.append((name, "a dynamic initializer or atexit: the file's statics in the hook DLL are its "
+                                        "own copies, the game's would stay uninitialized"))
+            elif not source.lower().endswith(".cpp"):
                 p.skipped.append((name, f"defined in a header ({Path(source.replace(chr(92), '/')).name}), "
                                         "inlined copies would stay"))
             elif length < MIN_HOOK:

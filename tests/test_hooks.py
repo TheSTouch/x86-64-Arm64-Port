@@ -41,11 +41,13 @@ class ModuleFixture:
 GAME = ModuleFixture("Game-FactoryGame-Win64-Shipping.dll",
                      {CONSTRUCT: (0x1010, True), "?Helper@@YAXXZ": (0x1100, True), "?GData@@3HA": (0x5000, False),
                       "?Inline@FGScreen@@QEAAHXZ": (0x1200, True), "?Tiny@@YAXXZ": (0x1300, True),
-                      "__security_cookie": (0x6000, False), "memcpy": (0x1400, True)},
+                      "__security_cookie": (0x6000, False), "memcpy": (0x1400, True),
+                      "??__EGName@@YAXXZ": (0x1500, True)},
                      {CONSTRUCT: (0x1010, 0x40, "D:\\Game\\Source\\Game\\Private\\Screen.cpp"),
                       "?Helper@@YAXXZ": (0x1100, 0x20, "D:\\Game\\Source\\Game\\Private\\Helper.cpp"),
                       "?Inline@FGScreen@@QEAAHXZ": (0x1200, 0x10, "D:\\Game\\Source\\Game\\Public\\Screen.h"),
-                      "?Tiny@@YAXXZ": (0x1300, 3, "D:\\Game\\Source\\Game\\Private\\Tiny.cpp")},
+                      "?Tiny@@YAXXZ": (0x1300, 3, "D:\\Game\\Source\\Game\\Private\\Tiny.cpp"),
+                      "??__EGName@@YAXXZ": (0x1500, 0x20, "D:\\Game\\Source\\Game\\Private\\Screen.cpp")},
                      code=bytes(range(0x40, 0x50)))
 PLUGIN = ModuleFixture("Game-OnlineIntegration-Win64-Shipping.dll", {"?Login@@YAXXZ": (0x2000, True)})
 
@@ -61,6 +63,12 @@ class PlanTest(unittest.TestCase):
         skipped = dict(p.skipped)
         self.assertIn("header", skipped["?Inline@FGScreen@@QEAAHXZ"])
         self.assertIn("shorter than", skipped["?Tiny@@YAXXZ"])
+
+    def test_dynamic_initializers_are_not_hooked(self):
+        # they initialize the file's statics: in the hook DLL those are its own copies, the game's would stay empty
+        p = self.plan([obj(defined=[CONSTRUCT, "??__EGName@@YAXXZ"])])
+        self.assertEqual([h.name for h in p.hooks], [CONSTRUCT])
+        self.assertIn("initializer", dict(p.skipped)["??__EGName@@YAXXZ"])
 
     def test_imports_from_project_modules_become_slots(self):
         p = self.plan([obj(defined=[CONSTRUCT], undefined=["__imp_?GData@@3HA", "__imp_?Login@@YAXXZ",
@@ -107,8 +115,8 @@ class EmitTest(unittest.TestCase):
         self.assertEqual(u32("RecompHookCount"), 1)
         self.assertEqual(u32("RecompImportCount"), 2)
         self.assertEqual(u32("RecompModuleCount"), 2)
-        self.assertEqual(u32("RecompTraceCount"), 4)
-        self.assertEqual([u32("RecompTraceRvas", i) for i in range(4)], [0x1010, 0x1100, 0x1200, 0x1300])
+        self.assertEqual(u32("RecompTraceCount"), 5)
+        self.assertEqual([u32("RecompTraceRvas", i) for i in range(5)], [0x1010, 0x1100, 0x1200, 0x1300, 0x1500])
 
 
 class WriterTest(unittest.TestCase):
