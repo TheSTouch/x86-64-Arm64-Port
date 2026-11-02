@@ -288,6 +288,28 @@ def intermediate(module):
     return f"{config.PC_PROJECT}/Intermediate/Build/Win64/x64/{config.PC_TARGET}/Shipping/{module}"
 
 
+def _ssh(command, **kw):
+    return run(["ssh", "-o", "ServerAliveInterval=30", config.PC_HOST, command], **kw)
+
+
+def _fetch(drive_paths, dest, patterns=()):
+    """tar over ssh: paths of one PC drive ("D:/a/b"), each a folder (whole) or with patterns (files in it)."""
+    by_drive = {}
+    for p in drive_paths:
+        by_drive.setdefault(p[0].upper(), []).append(p[3:])
+    for drive, rels in by_drive.items():
+        target = Path(dest) / drive
+        target.mkdir(parents=True, exist_ok=True)
+        for i in range(0, len(rels), 20):   # cmd.exe's line limit
+            names = " ".join(f'"{r}/{pat}"' if patterns else f'"{r}"' for r in rels[i:i + 20] for pat in (patterns or [""]))
+            ssh = f"cd /d {drive}:\\ && tar -cf - {names}"
+            with open(os.devnull, "wb") as null:
+                src = subprocess.Popen(["ssh", config.PC_HOST, ssh], stdout=subprocess.PIPE, stderr=null)
+                untar = run(["tar", "-xf", "-", "-C", target], stdin=src.stdout, check=False)
+                if src.wait() or untar.returncode:
+                    raise Fail(f"fetching from {config.PC_HOST} failed: {ssh}")
+
+
 def read_pc_text(path):
     if not Path(path).is_file():
         raise Fail(f"{path} not found: run ./port msvc mirror")
@@ -295,3 +317,90 @@ def read_pc_text(path):
     if raw[:2] in (b"\xff\xfe", b"\xfe\xff"):
         return raw.decode("utf-16")
     return raw.decode("utf-8-sig", "replace")
+
+
+def mirror(module="FactoryGameRecomp", project=None, check=True):
+    """Fetch from the PC what a compile of `module` needs and only the PC has: UBT's response files,
+    definitions and source dependencies for the module; the shared PCH's header and definitions; every
+    generated include folder (UHT's Inc trees, whole). Then, with check, hash the engine headers the PC's
+    compiles read (their .dep.json) on both sides."""
+    m = PathMap(project or ".")
+    started = time.monotonic()
+    inter = intermediate(module)
+    local = m.mirrored(inter)
+    local.mkdir(parents=True, exist_ok=True)
+    for old in list(local.glob("*.rsp")) + list(local.glob("*.dep.json")):
+        old.unlink()
+    _fetch([inter], m.mirror, ("*.rsp", "*.h", "*.dep.json"))
+    shared = local / f"{module}.Shared.rsp"
+    if not shared.is_file():
+        raise Fail(f"{shared.name} not fetched: has {module} been built on the PC?")
+    cmd = Command.parse(split_args(read_pc_text(shared)))
+    folders, headers = set(), set()
+    for d in cmd.values("/I") + cmd.values("/external:I"):
+        p = m.pc(d)
+        if m.generated(p):
+            parts = p.split("/")
+            low = [x.lower() for x in parts]
+            if "inc" in low:
+                folders.add("/".join(parts[:low.index("inc") + 1]))
+            else:
+                headers.add(p)   # the shared PCH's folder: its headers, not the PCH
+    for rsp in local.glob("*.cpp.obj.rsp"):
+        for f in Command.parse(split_args(read_pc_text(rsp)), read=lambda p: read_pc_text(m.mac(p))).values("/FI"):
+            if m.generated(f) and not m.pc(f).lower().startswith(m.pc(inter).lower() + "/"):
+                headers.add(posixpath.dirname(m.pc(f)))
+    step(f"Mirroring {len(folders)} generated include folders and the headers of {len(headers)} more")
+    _fetch(sorted(folders), m.mirror)
+    # The shared PCH's folder also holds its own response file and dependencies (not the PCH: gigabytes).
+    _fetch(sorted(headers), m.mirror, ("*.h", "*.cpp", "*.rsp", "*.dep.json"))
+    took = time.monotonic() - started
+    report = {"module": module, "folders": len(folders), "seconds": round(took)}
+    if check:
+        deps = list(local.glob("*.dep.json")) + [d for h in headers for d in m.mirrored(h).glob("*.dep.json")]
+        report.update(check_engine(deps, m))
+    return report
+
+
+def _hashes(data):
+    """SHA-1 of a file as it is, and as it would be with CRLF or LF line ends."""
+    lf = data.replace(b"\r\n", b"\n")
+    return {hashlib.sha1(x).hexdigest().upper() for x in (data, lf, lf.replace(b"\n", b"\r\n"))}
+
+
+def check_engine(deps, m):
+    """The engine headers the PC's compiles read (their .dep.json files), hashed on the PC and on the Mac's
+    clone: the clone must be the PC's engine."""
+    files = set()
+    for dep in deps:
+        data = json.loads(read_pc_text(dep)).get("Data", {})
+        for f in data.get("Includes", []):
+            p = m.pc(f)
+            if p.lower().startswith(config.PC_ENGINE.lower() + "/") and not m.generated(p):
+                files.add(p)
+    if not files:
+        return {"engine_files": 0}
+    script = "$input | ForEach-Object { if (Test-Path -LiteralPath $_) { (Get-FileHash -Algorithm SHA1 -LiteralPath $_).Hash + ' ' + $_ } else { 'MISSING ' + $_ } }"
+    out = _ssh(f'powershell -NoProfile -Command "{script}"', input="\n".join(sorted(files)) + "\n",
+               capture_output=True, text=True).stdout
+    same = endings = differ = absent = 0
+    differing = []
+    for line in out.splitlines():
+        digest, _, path = line.strip().partition(" ")
+        if not path or digest == "MISSING":
+            continue
+        mac = m.mac(path)
+        if not mac.is_file():
+            absent += 1
+            differing.append(f"not on the Mac: {path}")
+            continue
+        data = mac.read_bytes()
+        if hashlib.sha1(data).hexdigest().upper() == digest:
+            same += 1
+        elif digest in _hashes(data):
+            endings += 1
+        else:
+            differ += 1
+            differing.append(f"differs: {path}")
+    return {"engine_files": len(files), "identical": same, "line_endings": endings, "different": differ,
+            "absent": absent, "differing": differing}

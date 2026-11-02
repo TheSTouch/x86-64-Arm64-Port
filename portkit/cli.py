@@ -321,6 +321,18 @@ def cmd_msvc(a):
         if a.args_out:
             print("\n".join(cmd.lines()))
         return 1 if missing else 0
+    if a.action == "mirror":
+        report = msvc.mirror(a.module, check=not a.no_check)
+        print(f"{report['folders']} generated include folders and {a.module}'s response files mirrored to "
+              f"{config.MSVC_MIRROR / 'pc'} in {report['seconds']} s")
+        if "engine_files" in report and report["engine_files"]:
+            print(f"engine headers the PC's compiles read: {report['engine_files']}; identical on the Mac "
+                  f"{report['identical']}, the same but for line ends {report['line_endings']}, different "
+                  f"{report['different']}, not in the clone {report['absent']}")
+            for line in report["differing"][:20]:
+                print("  " + line)
+            return 1 if report["different"] or report["absent"] else 0
+        return 0
     return 0
 
 
@@ -452,11 +464,13 @@ def parser():
 
     sp = sub.add_parser("msvc", help="MSVC 14.38 under Wine: the PC's compiles replayed on the Mac, one unity "
                         "blob compiled and matched without UBT")
-    sp.add_argument("action", choices=["cl", "flags"],
-                    help="cl: run cl.exe with ARGS; flags: the command line an object records, and its response file's")
+    sp.add_argument("action", choices=["cl", "flags", "mirror"],
+                    help="cl: run cl.exe with ARGS; flags: the command line an object records, and its response file's; mirror: fetch what only the PC has")
     sp.add_argument("args", nargs="*", metavar="ARG", help="cl: its arguments; flags: OBJ")
     sp.add_argument("--rsp", metavar="FILE", help="flags: the response file (default: the mirrored one of the same name)")
     sp.add_argument("--args", dest="args_out", action="store_true", help="flags: print the response file's arguments")
+    sp.add_argument("--module", default="FactoryGameRecomp", help="the build module (default: %(default)s)")
+    sp.add_argument("--no-check", action="store_true", help="mirror: do not hash the engine headers on both sides")
     sp.set_defaults(fn=_msvc_args)
     return p
 
