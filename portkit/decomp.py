@@ -34,6 +34,11 @@ ACCESS = {"byte": 1, "word": 2, "dword": 4, "fword": 6, "qword": 8, "tbyte": 10,
 RCX = {"rcx", "ecx", "cx", "cl", "ch"}
 
 
+def objdump():
+    """Xcode's objdump on the Mac, LLVM's llvm-objdump on Windows (the same tool; both read COFF and PE)."""
+    return shutil.which("objdump") or shutil.which("llvm-objdump")
+
+
 class Module:
     @staticmethod
     def pdb_of(dll):
@@ -107,11 +112,11 @@ class Module:
         return self.string_at(rva)
 
     def disassemble(self, f, length=None):
-        if not shutil.which("objdump"):
+        if not objdump():
             raise Fail("objdump not found: install Xcode's command line tools")
         base = self.image.image_base
         start = base + self.rva(f.segment, f.offset)
-        out = subprocess.run(["objdump", "-d", "--no-show-raw-insn", "--x86-asm-syntax=intel",
+        out = subprocess.run([objdump(), "-d", "--no-show-raw-insn", "--x86-asm-syntax=intel",
                               f"--start-address={start:#x}", f"--stop-address={start + (length or f.length):#x}",
                               str(self.dll)], capture_output=True, text=True, check=False)
         lines = [f"; {f.name}",
@@ -503,7 +508,7 @@ def match(dll, obj, diff=()):
 
 
 def _align(m, pairs):
-    if not pairs or not shutil.which("objdump"):
+    if not pairs or not objdump():
         return
     blobs = []
     for r, fn, f in pairs:
@@ -567,7 +572,7 @@ def _disassemble(blobs):
     try:
         os.write(fd, w.build())
         os.close(fd)
-        out = subprocess.run(["objdump", "-d", "--no-show-raw-insn", "--x86-asm-syntax=intel", path],
+        out = subprocess.run([objdump(), "-d", "--no-show-raw-insn", "--x86-asm-syntax=intel", path],
                              capture_output=True, text=True, check=False).stdout
     finally:
         os.unlink(path)
@@ -609,7 +614,7 @@ def _compare(m, fn, shipped, how):
 
 def _instruction_at(m, f, offset):
     """The shipped instruction covering offset, from the annotated disassembly (needs objdump)."""
-    if not shutil.which("objdump"):
+    if not objdump():
         return None
     best = None
     for line in m.disassemble(f).splitlines():
