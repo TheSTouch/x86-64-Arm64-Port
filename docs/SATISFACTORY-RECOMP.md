@@ -294,6 +294,8 @@ GitHub, private or public, and no cloud storage.
 - **Working copy**: a git repository with no remote, `/Volumes/SMART/TheSTouch/satisfactory-recomp/`.
 - **Backup**: a bare repository on the Mac's internal disk, `~/Backups/satisfactory-recomp.git`, pushed to
   after each session (`git push backup`). It holds only text: recovered sources, notes, work lists.
+- **Hub** (2026-11-02): a bare repository on the owner's Windows PC, `D:\SatisfactoryRecomp\recomp.git`, over ssh on
+  the local network, so recovery sessions on the Mac and on the PC share work. Still the owner's own disks.
 - **Engine source and builds** (Coffee Stain's fork, tens of GB) stay on SMART only, outside this
   repository and the recovered-code repository.
 - **When the work ends**, both copies are archived to another drive, and the internal-disk copy is deleted.
