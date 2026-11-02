@@ -56,15 +56,20 @@ def info_stream(names_stream):
     return out
 
 
-def build_pdb():
-    """Stream 5 is the module, 6 the symbol records (publics), 7 /names."""
+def build_pdb(folded=False):
+    """Stream 5 is the module, 6 the symbol records (publics), 7 /names. folded: a second function at
+    FGScreen::Construct's address, with its own line subsection after Construct's."""
     files = b"\0D:\\Game\\Source\\Game\\Private\\Screen.cpp\0D:\\Engine\\Core\\Array.h\0"
     names = struct.pack("<III", 0xEFFEEFFE, 1, len(files)) + files
     # module stream: signature, then symbols, then C13 line info
     syms = struct.pack("<I", 4)
     body = rec(0x113E, struct.pack("<IH", 0x74, 0) + b"Args\0")
-    body += rec(0x114D, struct.pack("<III", 0, 0, 0x1000))  # an inlined call: its locals are not ours
-    body += rec(0x113E, struct.pack("<IH", 0x74, 0) + b"Inlined\0")
+    # Screen::Reset inlined (Array.h:100): line 101 at +6, line 102 at +0xd (+7, +1), then +0xe for 2 bytes
+    body += rec(0x114D, struct.pack("<III", 0, 0, 0x1000) + bytes([6, 2, 3, 6, 0xB, 0x27, 0xC, 2, 1]))
+    body += rec(0x113E, struct.pack("<IH", 0x74, 0) + b"Inlined\0")  # an inlined call's locals are not ours
+    # inside it, Detail::Clear (Array.h:50) at +0xd for 1 byte, line 51
+    body += rec(0x114D, struct.pack("<III", 0, 0, 0x1002) + bytes([6, 2, 0xC, 1, 0xD]))
+    body += rec(0x114E, b"")
     body += rec(0x114E, b"")
     body += rec(0x1111, struct.pack("<IIH", 0x28, 0x74, 335) + b"Slot\0")
     head = len(rec(0x1110, b"\0" * 35 + b"FGScreen::Construct\0"))
@@ -74,11 +79,23 @@ def build_pdb():
     syms += proc + body + rec(0x0006, b"")
     syms += rec(0x110F, struct.pack("<IIIIIIIIHB", 0, 0, 0, 0x8, 0, 8, 0, 0x60, 1, 0) + b"`anonymous'::Helper\0")
     syms += rec(0x0006, b"")
+    if folded:
+        end_at = len(syms) + len(rec(0x110F, b"\0" * 35 + b"FGScreen::Folded\0"))
+        syms += rec(0x110F, struct.pack("<IIIIIIIIHB", 0, end_at, 0, 0x40, 0, 0x40, 0, 0x10, 1, 0) + b"FGScreen::Folded\0")
+        syms += rec(0x0006, b"")
     checksums = struct.pack("<IBB", 1, 0, 0) + b"\0\0" + struct.pack("<IBB", 40, 0, 0) + b"\0\0"
     lines = struct.pack("<IHHI", 0x10, 1, 0, 0x40)
-    lines += struct.pack("<III", 0, 3, 12 + 3 * 8)
+    lines += struct.pack("<III", 0, 4, 12 + 4 * 8)
     lines += struct.pack("<II", 0, 20) + struct.pack("<II", 8, 21) + struct.pack("<II", 0x30, 27)
+    lines += struct.pack("<II", 0x34, 0x80FEEFEE)  # a hidden line (0xfeefee): no source, not a line number
+    lines += struct.pack("<III", 8, 1, 12 + 8) + struct.pack("<II", 0x38, 300)  # Array.h, after the first file
+    lines2 = struct.pack("<IHHI", 0x10, 1, 0, 0x40) + struct.pack("<III", 0, 2, 12 + 2 * 8)
+    lines2 += struct.pack("<II", 0, 40) + struct.pack("<II", 8, 42)  # FGScreen::Folded's own lines
+    inlinees = struct.pack("<I", 0) + struct.pack("<III", 0x1000, 8, 100) + struct.pack("<III", 0x1002, 8, 50)
     c13 = struct.pack("<II", 0xF4, len(checksums)) + checksums + struct.pack("<II", 0xF2, len(lines)) + lines
+    if folded:
+        c13 += struct.pack("<II", 0xF2, len(lines2)) + lines2
+    c13 += struct.pack("<II", 0xF6, len(inlinees)) + inlinees
     module = syms + c13
     # DBI: header, one module info record
     modi = struct.pack("<I", 0) + b"\0" * 28 + struct.pack("<HHIII", 0, 5, len(syms), 0, len(c13))
@@ -87,7 +104,7 @@ def build_pdb():
     dbi = struct.pack("<iIIHHHHHH", -1, 19990903, 1, 0xFFFF, 0, 0xFFFF, 0, 6, 0)
     dbi += struct.pack("<iiiiiIiiHHI", len(modi), 0, 0, 0, 0, 0, 0, 0, 0, 0x8664, 0) + modi
     publics = rec(0x110E, struct.pack("<IIH", 2, 0x10, 1) + b"?Construct@FGScreen@@QEAAXAEBUFArguments@1@@Z\0")
-    return msf([b"", info_stream(7), build_tpi(), dbi, b"", module, publics, names])
+    return msf([b"", info_stream(7), build_tpi(), dbi, build_ipi(), module, publics, names])
 
 
 def leaf(kind, body):
@@ -101,6 +118,17 @@ def sub(kind, body):
     out = struct.pack("<H", kind) + body
     pad = -len(out) % 4
     return out + bytes(0xF0 + pad - i for i in range(pad))
+
+
+def build_ipi():
+    """Function ids from 0x1000: Screen::Reset (a member function), the string "Detail", Detail::Clear."""
+    records = [leaf(0x1602, struct.pack("<II", 0x1004, 0x1007) + b"Reset\0"),
+               leaf(0x1605, struct.pack("<I", 0) + b"Detail\0"),
+               leaf(0x1601, struct.pack("<II", 0x1001, 0x1007) + b"Clear\0"),
+               leaf(0x1602, struct.pack("<II", 0x1004, 0x1007) + b"{ctor}\0"),
+               leaf(0x1602, struct.pack("<II", 0x1004, 0x1007) + b"{dtor}\0")]
+    data = b"".join(records)
+    return struct.pack("<IIIII", 20040203, 56, 0x1000, 0x1000 + len(records), len(data)) + b"\0" * 36 + data
 
 
 def build_tpi():
@@ -160,6 +188,43 @@ class PDBTest(unittest.TestCase):
         self.assertEqual(f.compiland, "Module.Game.1.cpp.obj")
         self.assertEqual(f.mangled, "?Construct@FGScreen@@QEAAXAEBUFArguments@1@@Z")
         self.assertIsNone(fns[1].source)
+
+    def test_lines_of_every_file_and_inline_sites(self):
+        path = self.write(build_pdb())
+        f = pdb.functions(path)[0]
+        d = pdb.Details(path).detail(f)
+        screen, array = "D:\\Game\\Source\\Game\\Private\\Screen.cpp", "D:\\Engine\\Core\\Array.h"
+        self.assertEqual(d.lines, [(0, screen, 20), (8, screen, 21), (0x30, screen, 27), (0x38, array, 300)])
+        reset, clear = d.inlines
+        self.assertEqual((reset.name, reset.file, reset.line, reset.depth), ("Screen::Reset", array, 100, 0))
+        self.assertEqual(reset.ranges, [(6, 0xd, array, 101), (0xd, 0xe, array, 102), (0xe, 0x10, array, 102)])
+        self.assertEqual((clear.name, clear.line, clear.depth), ("Detail::Clear", 50, 1))
+        self.assertEqual(clear.ranges, [(0xd, 0xe, array, 51)])
+        self.assertEqual(pdb.Details(path).inlinee_name(0x1003), "Screen::Screen")
+        self.assertEqual(pdb.Details(path).inlinee_name(0x1004), "Screen::~Screen")
+        self.assertEqual(pdb._unqualified("TMixin<SOverlay::FSlot>::FArgs<A::B>"), "FArgs<A::B>")
+
+    def test_functions_folded_at_one_address_keep_their_own_lines(self):
+        path = self.write(build_pdb(folded=True))
+        construct, folded = pdb.functions(path)[:2]
+        self.assertEqual((folded.name, folded.first_line, folded.last_line), ("FGScreen::Folded", 40, 42))
+        self.assertEqual((construct.first_line, construct.last_line), (20, 27))
+        screen = "D:\\Game\\Source\\Game\\Private\\Screen.cpp"
+        self.assertEqual(pdb.Details(path).detail(folded).lines, [(0, screen, 40), (8, screen, 42)])
+        self.assertEqual(pdb.Details(path).detail(construct).lines[0], (0, screen, 20))
+
+    def test_binary_annotations(self):
+        # ChangeCodeOffset 0x1743, ChangeLineOffset +4, ChangeCodeLengthAndCodeOffset (0x12, 0x12): MSVC's
+        # encoding, the offset counted from the previous range's start; operands of 2 and 4 bytes
+        self.assertEqual(list(pdb._annotations(bytes([6, 2, 3, 0x97, 0x43, 6, 8, 0xC, 0x12, 0x12, 0]))),
+                         [(6, 1), (3, 0x1743), (6, 4), (0xC, 0x12, 0x12)])
+        self.assertEqual(list(pdb._annotations(bytes([3, 0xC0, 0x01, 0x02, 0x03, 0xB, 0x2E]))),
+                         [(3, 0x10203), (0xB, 0xE, 1)])
+        self.assertEqual(pdb._inline_ranges(bytes([6, 2, 3, 0x97, 0x43, 6, 8, 0xC, 0x12, 0x12]), "a.h", 10, {}),
+                         [(0x1743, 0x1755, "a.h", 11), (0x1755, 0x1767, "a.h", 15)])
+        # LLVM's encoding: ChangeCodeLength closes the range and moves past it; ChangeFile; a negative line
+        self.assertEqual(pdb._inline_ranges(bytes([3, 4, 4, 2, 5, 8, 6, 3, 3, 1, 4, 1]), "a.h", 10, {8: "b.h"}),
+                         [(4, 6, "a.h", 10), (7, 8, "b.h", 9)])
 
     def test_publics(self):
         self.assertEqual(pdb.publics(self.write(build_pdb())),

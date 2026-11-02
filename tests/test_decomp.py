@@ -47,6 +47,18 @@ class DecompTest(unittest.TestCase):
         self.assertIn("; locals: int Args, int Slot", text)
 
     @unittest.skipUnless(shutil.which("objdump"), "needs objdump (Xcode command line tools)")
+    def test_source_lines_and_inline_sites_between_instructions(self):
+        m = decomp.Module(self.dll)
+        body = m.disassemble(m.function("FGScreen::Construct"), length=0x12).split("; locals: int Args, int Slot\n")[1]
+        listing = [line if line.startswith(";") else line.split()[0] for line in body.splitlines()]
+        self.assertEqual(listing, [
+            "; Screen.cpp:20", "+00000",
+            "; > inlined Screen::Reset (Array.h:100)", ";   Array.h:101", "+00006",
+            ";   > inlined Detail::Clear (Array.h:50)", ";     Array.h:51", "+0000d",
+            ";   < Detail::Clear", ";   Array.h:102", "+0000e",
+            "; < Screen::Reset", "; Screen.cpp:21", "+00010"])
+
+    @unittest.skipUnless(shutil.which("objdump"), "needs objdump (Xcode command line tools)")
     def test_jumps_inside_the_function_read_as_offsets(self):
         data = bytearray(self.dll.read_bytes())
         data[0x410:0x412] = b"\xeb\xfe"  # jmp to itself, at the function's start (file offset 0x400 + 0x10)

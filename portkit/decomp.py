@@ -2,9 +2,10 @@
 
 The disassembly names what each instruction reaches: imported functions (through
 the import address table), the module's own functions (from the PDB) and string
-literals. What `dump` writes is derived from the game, so it refuses to write
-inside this repository (docs/SATISFACTORY-RECOMP.md: recovered code stays on the
-owner's disks). `match` compares a compiled object file with the shipped module.
+literals; between instructions, the source line and the inlined calls. What `dump`
+writes is derived from the game, so it refuses to write inside this repository
+(docs/SATISFACTORY-RECOMP.md: recovered code stays on the owner's disks). `match`
+compares a compiled object file with the shipped module.
 """
 
 import re
@@ -36,13 +37,19 @@ class Module:
         self.functions = pdb.functions(self.pdb)
         self.names = {self.rva(s, o): n for (s, o), n in pdb.publics(self.pdb).items() if 0 < s <= len(self.image.sections)}
         self.names.update({self.rva(f.segment, f.offset): f.name for f in self.functions})
-        self._types = None
+        self._types = self._details = None
 
     @property
     def types(self):
         if self._types is None:
             self._types = pdb.Types(self.pdb)
         return self._types
+
+    @property
+    def details(self):
+        if self._details is None:
+            self._details = pdb.Details(self.pdb, self.types)
+        return self._details
 
     def rva(self, segment, offset):
         return self.image.sections[segment - 1].vaddr + offset
@@ -103,6 +110,7 @@ class Module:
         if f.locals:
             lines.append("; locals: " + ", ".join(
                 f"{self.types.name(f.local_types[n])} {n}" if n in f.local_types else n for n in f.locals))
+        source = _Source(self.details.detail(f) if f.module != 0xFFFF else None)
         for raw in out.stdout.splitlines():
             if not (hit := LINE.match(raw)):
                 continue
@@ -119,8 +127,45 @@ class Module:
                 note = self.label(rva) or (f"[{rva:#x}]" if "rip" in insn else None)
                 if note and note not in notes:
                     notes.append(note)
+            lines += source.at(addr - start)
             lines.append(f"  +{addr - start:05x}  {insn:<56}" + (f" ; {'; '.join(notes)}" if notes else ""))
         return "\n".join(lines) + "\n"
+
+
+class _Source:
+    """The comment lines before each instruction: `; File:line` where the line changes, and `; > inlined X
+    (File:line)` / `; < X` where an inline site's range starts and ends, indented by depth."""
+
+    def __init__(self, detail):
+        self.lines = detail.lines if detail else []
+        self.inlines = detail.inlines if detail else []
+        self.stack, self.shown = [], None
+
+    def at(self, offset):
+        stack = sorted((s for s in self.inlines if any(r[0] <= offset < r[1] for r in s.ranges)), key=lambda s: s.depth)
+        out, keep = [], 0
+        while keep < min(len(stack), len(self.stack)) and stack[keep] is self.stack[keep]:
+            keep += 1
+        for s in reversed(self.stack[keep:]):
+            out.append(f"; {'  ' * s.depth}< {s.name}")
+        for s in stack[keep:]:
+            out.append(f"; {'  ' * s.depth}> inlined {s.name}" + (f" ({_base(s.file)}:{s.line})" if s.file else ""))
+        where = None
+        for s in reversed(stack):
+            where = next(((file, line) for a, b, file, line in s.ranges if a <= offset < b and file), None)
+            if where:
+                break
+        if where is None:
+            where = next(((file, line) for at, file, line in reversed(self.lines) if at <= offset and file), None)
+        if where and (where != self.shown or out):
+            out.append(f"; {'  ' * len(stack)}{_base(where[0])}:{where[1]}")
+            self.shown = where
+        self.stack = stack
+        return out
+
+
+def _base(path):
+    return path.replace("\\", "/").rsplit("/", 1)[-1]
 
 
 def _is_game_source(path):

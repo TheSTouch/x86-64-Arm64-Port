@@ -3,10 +3,12 @@
 Reads what the recompilation needs: the signature (a PDB belongs to a binary
 when its GUID and age match the binary's CodeView record, which pe.parse reads
 as pdb_guid and pdb_age), every function with its source file, lines and named
-locals, and the public symbols with their decorated names.
+locals, and the public symbols with their decorated names. `Details` reads one
+function further: the line of every instruction and its inlined calls.
 """
 
 import math
+import re
 import struct
 from dataclasses import dataclass, field
 
@@ -14,9 +16,11 @@ MAGIC = b"Microsoft C/C++ MSF 7.00\r\n\x1aDS\0\0\0"
 
 S_END, S_GPROC32, S_LPROC32, S_PUB32 = 0x0006, 0x1110, 0x110F, 0x110E
 S_LOCAL, S_REGREL32, S_INLINESITE, S_INLINESITE_END = 0x113E, 0x1111, 0x114D, 0x114E
-S_GPROC32_ID, S_LPROC32_ID = 0x1147, 0x1146
+S_GPROC32_ID, S_LPROC32_ID, S_INLINESITE2 = 0x1147, 0x1146, 0x115D
 PROCS = {S_GPROC32, S_LPROC32, S_GPROC32_ID, S_LPROC32_ID}
-DEBUG_S_LINES, DEBUG_S_FILECHKSMS = 0xF2, 0xF4
+DEBUG_S_LINES, DEBUG_S_FILECHKSMS, DEBUG_S_INLINEELINES = 0xF2, 0xF4, 0xF6
+HIDDEN_LINE = 0xF00000  # 0xfeefee and 0xf00f00 mark code with no source line
+LF_FUNC_ID, LF_MFUNC_ID, LF_STRING_ID = 0x1601, 0x1602, 0x1605
 
 
 class NotPDB(ValueError):
@@ -37,6 +41,23 @@ class Function:
     mangled: str | None = None
     type_index: int = 0
     local_types: dict = field(default_factory=dict)  # local name -> type index
+    module: int = 0xFFFF  # the module stream holding its symbols, and the offset of its record there (Details)
+    record: int = 0
+
+
+@dataclass
+class InlineSite:
+    name: str
+    file: str | None   # where the inlinee is defined, and its first line (DEBUG_S_INLINEELINES)
+    line: int | None
+    depth: int         # 0: inlined into the function itself, 1: into an inline site of depth 0...
+    ranges: list = field(default_factory=list)   # (start, end, file, line), offsets from the function's start
+
+
+@dataclass
+class Detail:
+    lines: list      # (offset, file, line) from the line table, every file, in address order
+    inlines: list    # InlineSite, in the order of their records (a parent before its children)
 
 
 class MSF:
@@ -161,9 +182,9 @@ def public_symbols(path):
         return out
 
 
-def _lines(c13, names):
-    """{(segment, offset): (source file, first line, last line)} from a module's C13 line info."""
-    files, spans = {}, []
+def _files(c13, names):
+    """{checksum offset: source file} from a module's DEBUG_S_FILECHKSMS."""
+    files = {}
     for kind, body in _subsections(c13):
         if kind == DEBUG_S_FILECHKSMS:
             q = 0
@@ -171,17 +192,37 @@ def _lines(c13, names):
                 name_off, size, _ = struct.unpack_from("<IBB", body, q)
                 files[q] = _cstr(names, 12 + name_off)
                 q = (q + 6 + size + 3) & ~3
-        elif kind == DEBUG_S_LINES and len(body) >= 12:
+    return files
+
+
+def _line_tables(c13):
+    """For each DEBUG_S_LINES subsection: (segment, offset, [(file checksum offset, [(offset from the function's
+    start, line)])]), hidden lines left out. Functions folded at one address in one module each have their own
+    subsection, in the order of their records."""
+    for kind, body in _subsections(c13):
+        if kind == DEBUG_S_LINES and len(body) >= 12:
             off, seg, _, _ = struct.unpack_from("<IHHI", body)
-            q, nums, first_file = 12, [], None
+            q, blocks = 12, []
             while q + 12 <= len(body):
                 fid, n, size = struct.unpack_from("<III", body, q)
-                first_file = fid if first_file is None else first_file
-                if fid == first_file:
-                    nums += [struct.unpack_from("<I", body, q + 12 + 8 * i + 4)[0] & 0xFFFFFF for i in range(n)]
+                entries = []
+                for i in range(n):
+                    at, number = struct.unpack_from("<II", body, q + 12 + 8 * i)
+                    if number & 0xFFFFFF < HIDDEN_LINE:
+                        entries.append((at, number & 0xFFFFFF))
+                blocks.append((fid, entries))
                 q += max(size, 12)
-            spans.append(((seg, off), first_file, nums))
-    return {key: (files.get(fid), min(n), max(n)) for key, fid, n in spans if n}
+            yield seg, off, blocks
+
+
+def _lines(c13, names):
+    """{(segment, offset): [(source file, first line, last line) or None]} from a module's C13 line info, one
+    entry per subsection: the lines of the function's first file."""
+    files, spans = _files(c13, names), {}
+    for seg, off, blocks in _line_tables(c13):
+        nums = [n for fid, entries in blocks if fid == blocks[0][0] for _, n in entries] if blocks else []
+        spans.setdefault((seg, off), []).append((files.get(blocks[0][0]), min(nums), max(nums)) if nums else None)
+    return spans
 
 
 def _subsections(c13):
@@ -207,7 +248,7 @@ def functions(path):
                 continue
             data = m.read(stream)
             lines = _lines(data[sym_bytes + c11:sym_bytes + c11 + c13], names)
-            out += _module_functions(data[:sym_bytes], compiland, lines)
+            out += _module_functions(data[:sym_bytes], compiland, lines, stream)
     pubs, seen, unique = publics(path), set(), []
     for f in sorted(out, key=lambda f: (f.segment, f.offset)):
         if (key := (f.name, f.segment, f.offset)) in seen:  # inline functions emitted by several compilands
@@ -219,20 +260,22 @@ def functions(path):
     return unique
 
 
-def _module_functions(syms, compiland, lines):
-    out, current, end_at, inline_depth = [], None, None, 0
+def _module_functions(syms, compiland, lines, stream=0xFFFF):
+    out, current, end_at, inline_depth, folded = [], None, None, 0, {}
     for off, kind, body in _records(syms, 4):
         if kind in PROCS and len(body) >= 35:
             _, p_end, _, length, _, _, ti, offset, seg = struct.unpack_from("<IIIIIIIIH", body)
-            current = Function(_cstr(body, 35), seg, offset, length, compiland, type_index=ti)
-            current.source, current.first_line, current.last_line = lines.get((seg, offset), (None, None, None))
+            current = Function(_cstr(body, 35), seg, offset, length, compiland, type_index=ti, module=stream, record=off)
+            k = folded[(seg, offset)] = folded.get((seg, offset), -1) + 1
+            spans = lines.get((seg, offset)) or [None]
+            current.source, current.first_line, current.last_line = spans[min(k, len(spans) - 1)] or (None, None, None)
             out.append(current)
             end_at, inline_depth = p_end, 0
         elif current is None:
             continue
         elif off == end_at:
             current = None
-        elif kind == S_INLINESITE:
+        elif kind in (S_INLINESITE, S_INLINESITE2):
             inline_depth += 1
         elif kind == S_INLINESITE_END:
             inline_depth -= 1
@@ -243,6 +286,179 @@ def _module_functions(syms, compiland, lines):
             current.locals.append(name := _cstr(body, 10))
             current.local_types.setdefault(name, struct.unpack_from("<I", body, 4)[0])
     return out
+
+
+def _annotations(data):
+    """The binary annotations of an inline site, as (opcode, operands...): line offsets signed, the combined
+    ChangeCodeOffsetAndLineOffset split into (code delta, line delta)."""
+    q = 0
+
+    def operand():
+        nonlocal q
+        b = data[q]
+        if b & 0x80 == 0:
+            q += 1
+            return b
+        if b & 0xC0 == 0x80:
+            q += 2
+            return (b & 0x3F) << 8 | data[q - 1]
+        q += 4
+        return (b & 0x1F) << 24 | data[q - 3] << 16 | data[q - 2] << 8 | data[q - 1]
+
+    def signed(v):
+        return -(v >> 1) if v & 1 else v >> 1
+
+    while q < len(data):
+        op = operand()
+        if op == 0 or op > 13:  # 0: the padding after the last one
+            return
+        if op == 11:
+            v = operand()
+            yield op, v & 0xF, signed(v >> 4)
+        elif op == 12:
+            yield op, operand(), operand()
+        elif op in (6, 10):
+            yield op, signed(operand())
+        else:
+            yield op, operand()
+
+
+def _inline_ranges(data, file, line, files):
+    """An inline site's code ranges, from its binary annotations: (start, end, file, line), offsets from the
+    function's start. Code offsets accumulate their deltas; a range ends where the next starts, or after an
+    explicit length (ChangeCodeLength, which also moves past it, as LLVM writes it)."""
+    ranges, code, open_ = [], 0, None
+
+    def start(at):
+        nonlocal open_
+        if open_ is not None:
+            ranges[open_] = (ranges[open_][0], at) + ranges[open_][2:]
+        ranges.append((at, None, file, line))
+        open_ = len(ranges) - 1
+
+    for op, *v in _annotations(data):
+        if op == 1:                        # CodeOffset
+            code = v[0]
+            start(code)
+        elif op == 3:                      # ChangeCodeOffset
+            code += v[0]
+            start(code)
+        elif op == 4 and open_ is not None:  # ChangeCodeLength
+            ranges[open_] = (ranges[open_][0], ranges[open_][0] + v[0]) + ranges[open_][2:]
+            code, open_ = ranges[open_][0] + v[0], None
+        elif op == 5:                      # ChangeFile
+            file = files.get(v[0], file)
+        elif op == 6:                      # ChangeLineOffset
+            line += v[0]
+        elif op == 11:                     # ChangeCodeOffsetAndLineOffset
+            code, line = code + v[0], line + v[1]
+            start(code)
+        elif op == 12:                     # ChangeCodeLengthAndCodeOffset
+            code += v[1]
+            start(code)
+            ranges[open_] = (code, code + v[0]) + ranges[open_][2:]
+            open_ = None
+    return [r for r in ranges if r[1] is not None and r[1] > r[0]]
+
+
+def _unqualified(name):
+    """The last component of a qualified name, "::" inside template arguments left alone."""
+    depth, cut = 0, 0
+    for i, c in enumerate(name):
+        depth += (c == "<") - (c == ">")
+        if depth == 0 and name.startswith("::", i):
+            cut = i + 2
+    return name[cut:]
+
+
+class Details:
+    """What a function's records say beyond its name and lines: the line of every instruction, its inlined
+    calls. Reads one module at a time (the last few are kept)."""
+
+    def __init__(self, path, types=None):
+        self.path, self._types, self._ipi, self._modules = path, types, None, {}
+        with MSF(path) as m:
+            dbi, _, modi_size = _dbi(m)
+            self.names = m.read(_named_streams(m.read(1)).get("/names", 0xFFFF))
+        self.layout, off = {}, 64
+        while off < 64 + modi_size:
+            stream, sym_bytes, c11, c13 = struct.unpack_from("<HIII", dbi, off + 34)
+            name_end = dbi.index(b"\0", off + 64)
+            off = (dbi.index(b"\0", name_end + 1) + 4) & ~3
+            self.layout[stream] = (sym_bytes, c11, c13)
+
+    @property
+    def types(self):
+        if self._types is None:
+            self._types = Types(self.path)
+        return self._types
+
+    @property
+    def ipi(self):
+        if self._ipi is None:
+            self._ipi = Types(self.path, stream=4)
+        return self._ipi
+
+    def _module(self, stream):
+        if stream not in self._modules:
+            if len(self._modules) >= 8:
+                self._modules.pop(next(iter(self._modules)))
+            sym_bytes, c11, c13 = self.layout.get(stream, (0, 0, 0))
+            with MSF(self.path) as m:
+                data = m.read(stream)
+            c13 = data[sym_bytes + c11:sym_bytes + c11 + c13]
+            files, lines, inlinees = _files(c13, self.names), {}, {}
+            for seg, off, blocks in _line_tables(c13):
+                entries = sorted((at, files.get(fid), n) for fid, rows in blocks for at, n in rows)
+                lines.setdefault((seg, off), []).append(entries)
+            ordinal, count = {}, {}
+            for off, kind, body in _records(data[:sym_bytes], 4):
+                if kind in PROCS and len(body) >= 35:
+                    key = struct.unpack_from("<IH", body, 28)
+                    ordinal[off] = count[key] = count.get(key, -1) + 1
+            for kind, body in _subsections(c13):
+                if kind == DEBUG_S_INLINEELINES and len(body) >= 4:
+                    extended, q = struct.unpack_from("<I", body)[0] == 1, 4
+                    while q + 12 <= len(body):
+                        inlinee, fid, line = struct.unpack_from("<III", body, q)
+                        inlinees[inlinee] = (files.get(fid), line)
+                        q += 12 + (4 + 4 * struct.unpack_from("<I", body, q + 12)[0] if extended else 0)
+            self._modules[stream] = (data[:sym_bytes], files, lines, inlinees, ordinal)
+        return self._modules[stream]
+
+    def inlinee_name(self, item):
+        kind, body = self.ipi.record(item)
+        if kind == LF_MFUNC_ID:
+            cls, name = self.types.name(struct.unpack_from("<I", body)[0]), _cstr(body, 8)
+            if name in ("{ctor}", "{dtor}"):  # MSVC's names for them
+                short = re.sub(r"<.*", "", _unqualified(cls))
+                name = short if name == "{ctor}" else "~" + short
+            return f"{cls}::{name}"
+        if kind == LF_FUNC_ID:
+            scope, name = struct.unpack_from("<I", body)[0], _cstr(body, 8)
+            skind, sbody = self.ipi.record(scope) if scope else (None, b"")
+            return f"{_cstr(sbody, 4)}::{name}" if skind == LF_STRING_ID else name
+        return f"<inlinee {item:#x}>"
+
+    def detail(self, f):
+        syms, files, lines, inlinees, ordinal = self._module(f.module)
+        tables = lines.get((f.segment, f.offset)) or [[]]
+        out = Detail(tables[min(ordinal.get(f.record, 0), len(tables) - 1)], [])
+        if f.record + 4 > len(syms):
+            return out
+        end_at = struct.unpack_from("<I", syms, f.record + 8)[0]
+        depth = 0
+        for off, kind, body in _records(syms, f.record, end_at):
+            if kind in (S_INLINESITE, S_INLINESITE2) and len(body) >= 12:
+                inlinee = struct.unpack_from("<I", body, 8)[0]
+                file, line = inlinees.get(inlinee, (None, None))
+                annotations = body[16 if kind == S_INLINESITE2 else 12:]
+                out.inlines.append(InlineSite(self.inlinee_name(inlinee), file, line, depth,
+                                              _inline_ranges(annotations, file, line or 0, files)))
+                depth += 1
+            elif kind == S_INLINESITE_END:
+                depth -= 1
+        return out
 
 
 # Type records (TPI stream). Only what describing a class needs: layouts, bases, members and virtual functions.
@@ -284,11 +500,12 @@ def _numeric(buf, off):
 
 
 class Types:
-    """The type stream, indexed lazily: udt(name), vtable(name), describe(name), name(type index)."""
+    """The type stream, indexed lazily: udt(name), vtable(name), describe(name), name(type index). With
+    stream=4, the IPI stream (function ids), which has the same layout."""
 
-    def __init__(self, path):
+    def __init__(self, path, stream=2):
         with MSF(path) as m:
-            self.buf = m.read(2)
+            self.buf = m.read(stream)
         if len(self.buf) < 56:
             raise NotPDB(f"{path}: no type stream")
         _, header, self.first, self.end, size = struct.unpack_from("<IIIII", self.buf)
