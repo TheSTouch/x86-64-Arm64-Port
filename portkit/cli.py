@@ -174,6 +174,15 @@ def cmd_inspect(a):
 
 
 def cmd_decomp(a):
+    if a.trace:
+        rows, files = decomp.trace(a.dll, a.trace)
+        for r in rows:
+            print(f"{r.ms:>8} {r.thread:>6} {r.rva:#010x} {r.length:>6}  {r.source or '-'}  {r.name}")
+        print(f"\n{len(files)} source files, in order of first execution:")
+        for name, n, size, first in files:
+            print(f"{first:>8} ms  {n:>5} functions {size:>8} bytes  {name}")
+        print(f"{len(rows)} functions run, {sum(r.length for r in rows)} bytes", file=sys.stderr)
+        return 0
     if a.match:
         results = decomp.match(a.dll, a.match)
         for r in results:
@@ -311,6 +320,8 @@ def parser():
     sp.add_argument("--out", metavar="DIR", help="write functions.tsv and one .asm per function (outside this repository)")
     sp.add_argument("--match", metavar="OBJ", help="compare each function of a compiled .obj with the shipped one "
                     "(relocated operands masked): matched, or the first difference")
+    sp.add_argument("--trace", metavar="TSV", help="name the functions of a trace from the hook loader's trace mode "
+                    "(RecompTrace.tsv), and sum them by source file")
     sp.set_defaults(fn=cmd_decomp)
 
     sp = sub.add_parser("hooks", help="the tables object a hook DLL links in (windows/recomp-hooks): hooks over the "

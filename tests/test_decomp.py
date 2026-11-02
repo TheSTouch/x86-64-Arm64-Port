@@ -82,3 +82,18 @@ class DecompTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TraceTest(unittest.TestCase):
+    def test_trace_rows_get_their_function_and_file(self):
+        with tempfile.TemporaryDirectory() as d:
+            dll = Path(d) / "Game-Screen-Win64-Shipping.dll"
+            dll.write_bytes(build_dll())
+            dll.with_suffix(".pdb").write_bytes(build_pdb())
+            tsv = Path(d) / "RecompTrace.tsv"
+            tsv.write_text("# first execution of each function\n5\t100\t00001010\n9\t200\t00009999\n")
+            rows, files = decomp.trace(dll, tsv)
+            self.assertEqual([(r.ms, r.thread, r.rva, r.name) for r in rows],
+                             [(5, 100, 0x1010, "FGScreen::Construct"), (9, 200, 0x9999, "?")])
+            self.assertEqual(rows[0].source, "Screen.cpp")
+            self.assertEqual(files, [("Screen.cpp", 1, 0x40, 5)])   # file, functions, bytes, first ms

@@ -156,6 +156,40 @@ def dump(dll, out, source_marker=None):
 
 
 @dataclass
+class TraceRow:
+    ms: int
+    thread: int
+    rva: int
+    name: str
+    source: str = ""
+    length: int = 0
+
+
+def trace(dll, tsv):
+    """A trace written by the hook loader's trace mode (RecompTrace.tsv: ms, thread, rva of each function's first
+    execution), with each function's name and source file; and by source file, in order of first execution:
+    (file, functions run, their bytes, first ms)."""
+    m = Module(dll)
+    by_rva = {}
+    for f in m.functions:
+        by_rva.setdefault(m.rva(f.segment, f.offset), f)
+    rows, files = [], {}
+    for line in Path(tsv).read_text(encoding="utf-8", errors="replace").splitlines():
+        parts = line.split("\t")
+        if line.startswith("#") or len(parts) < 3:
+            continue
+        ms, thread, rva = int(parts[0]), int(parts[1]), int(parts[2], 16)
+        f = by_rva.get(rva)
+        source = Path(f.source.replace("\\", "/")).name if f and f.source else ""
+        rows.append(TraceRow(ms, thread, rva, f.name if f else "?", source, f.length if f else 0))
+        if source:
+            n, size, first = files.get(source, (0, 0, ms))
+            files[source] = (n + 1, size + rows[-1].length, first)
+    ordered = sorted(files.items(), key=lambda kv: kv[1][2])
+    return rows, [(name, n, size, first) for name, (n, size, first) in ordered]
+
+
+@dataclass
 class Match:
     name: str            # the object file's (decorated) name
     state: str           # matched, differs, missing
