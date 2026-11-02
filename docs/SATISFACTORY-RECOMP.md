@@ -340,8 +340,24 @@ not the building.
 | 5 | **Systematic differences fixed once.** Whether FName `==` as two 32-bit compares comes from an engine setting or from the engine's version; class layouts compared between the game's PDB and css-83, so drifting classes are known before their functions are written | thousands of functions that compare FNames; work on functions that can never match |
 | 6 | **Parallel work by unity blob.** Files in different blobs do not change each other's inlining, so several people or sessions work at once and share one build queue | wall time |
 
-1 and 2 come first: they help people and AI sessions alike, and 1 is the only one that keeps matching going
-while the PC is unreachable.
+What `./port decomp` writes in each `.asm` today: the signature, the first and last line, the locals, and
+called functions and string literals by name. The PDB has more that `pdb.py` reads past: the line of every
+instruction, every inlined call (`S_INLINESITE`: its range and inlinee), and which register holds which local
+where (`S_DEFRANGE_*`). The next changes use that, and the running game:
+
+| # | Change | What it saves |
+|---|---|---|
+| 7 | **A source line on every instruction, and inlined calls by name.** The C13 line table for each address, and each inline site with its range and its inlinee ("lines 45-47: `TArray::Add` inlined"; "`UFGFoo::GetBar` inlined from its header", whose body is already in `Headers.zip`) | working out the structure from the assembly: the C++ is written line by line |
+| 8 | **Field names instead of offsets.** `[rcx + 0x408]` becomes `this->mCachedOwner`: the type of `this`, the class layouts (`--type`), and the registers the PDB says hold each typed local, over their ranges | looking up offsets by hand, with no type guessing |
+| 9 | **Constructors drafted from the running game.** The hook loader walks each FactoryGame class's default object through reflection and dumps every property's name and value, turned into `mFoo = 5.0f;` lines; only members reflection does not see need the assembly | most of the load phase (1,154 functions, 287 KB, about 39 % of the menu path's bytes), mostly constructors and static initializers |
+| 10 | **Families recovered once.** Each function's code hashed with its addresses and offsets masked; identical or near-identical groups (`UFGUserSettingApplyType` subclasses, the `Get( WorldContext )` subsystem getters, option rows) recovered once and the pattern carried to the rest. To measure first | repeating the same recovery |
+| 11 | **A permuter for the last differences.** As decomp-permuter does for the N64 decompilations: small rewrites of the C++ (statement order, temporaries, casts) kept when they score closer; needs a numeric diff score instead of the first difference, and 1 | the register-allocation and ordering differences that take the longest by hand; runs unattended |
+| 12 | **Work counted in source, not functions.** Functions from the same lines of a game file (template instances, copies of one inline) counted once, templates first | a truer size of the job; one source, several matches |
+| 13 | **Later milestones: stubs that log.** In the native build an unrecovered function is a stub that logs "not recovered: X", and traces of real play pick the work; debug commands, the cheat manager and server-only code may never need recovering | everything that never runs |
+
+Order (decided 2026-11-02, to put in place when the owner is back at the PC): 7 then 8 (Mac only, PDB parsing
+in `pdb.py` and `decomp.py`); then 1 and 2, which make 11 possible; 10 measured before it is built; 9 once the
+game can run; 12 with the next counter; 13 with the native milestones.
 
 ## Recovery by someone else, without AI
 
