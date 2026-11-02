@@ -176,7 +176,7 @@ of Coffee Stain's own) checks the overlay itself before any recovered code is in
 |---|---|---|
 | 0 | The shipped game on the Porting Kit, and `STATUS.md` in the recovered-code repository: functions written and matched, by module | done |
 | 1 | The game starts with **our** `FactoryPreEarlyLoadingScreen` DLL, built from recovered source for Win64, in place of Coffee Stain's. A `RECOMP_WATERMARK` build (off when matching) prints "recomp: N modules, M functions" on the loading screen | done 2026-11-02, on the owner's Windows PC (`windows/overlay.ps1`): the menu reached with the watermark on the loading screen |
-| 2 | More of the game is ours each time: whole small modules swapped (FactoryMessagingTypes, then Coffee Stain's plugins), and inside FactoryGame, each recovered function hooked over the shipped one by a loader DLL. The watermark's counters grow; the game must keep playing | A hook loader (SML's approach), the matching harness |
+| 2 | More of the game is ours each time: whole small modules swapped (FactoryMessagingTypes, then Coffee Stain's plugins), and inside FactoryGame, each recovered function hooked over the shipped one by a loader DLL. The watermark's counters grow; the game must keep playing | started 2026-11-02: the hook loader runs in the shipped game on Windows ("Step 2" below); the menu path is measured by trace mode |
 | 3 | The native milestone below: the Mac build of the engine draws the early loading screen from recovered code | Step 1's module, the engine built for macOS arm64 |
 | 4 | Native main menu, with the rest of FactoryGame still stubs | The menu's C++ classes recovered |
 | 5 | Native: load a save and walk around | Most of FactoryGame recovered |
@@ -235,9 +235,21 @@ FactoryGame.dll (15 MB) cannot be swapped whole, so its functions are replaced o
   checks each hooked function's first bytes and writes a jump to ours. `Recomp.log`, next to the game's log, lists it.
 - **Proof (2026-11-02).** `UFGVersionFunctionLibrary::GetVersionString`, recovered and matched, hooked over the shipped
   one: the main menu reads "Version: 1.2.4.1 CL#513885 (recomp)", the mark the hook build adds after the literal.
+- **Recovering FactoryGame (2026-11-02).** Functions compile in the shipped build's unity blob (the PDB names each
+  function's `Module.FactoryGame.<n>.cpp`): what the shipped build inlined from another file of its blob is only inlined
+  here if that file's function is recovered too. Coffee Stain's checks are `fgcheck` (the CSS engine's FG_CHECK_IMPL).
+  By the morning of 2026-11-02: 64 FactoryGame functions hooked (FGGameInstance, FGGameUserSettings, FGLocalPlayer,
+  FGGameEngine, FGGameMode, FGGameSession...), 52 of them matching byte for byte; each batch ran in the shipped game
+  through the watcher (menu, Options, exit, no error). The counters live in the recovered-code repository's STATUS.md.
+- **What does not match** is recorded with its evidence: inlining decisions of a smaller translation unit (an engine
+  template the shipped build called, inlined here), and engine drift (FName == compares the two halves separately in
+  the shipped build, one 64-bit compare in css-83).
 - **Trace mode.** Tables made with `--trace` also list every FactoryGame function; the loader puts an int3 on each
-  entry, and the first execution of each traps once, is written to `RecompTrace.tsv` and runs on. It replaces guessing
-  which functions the menus use.
+  entry, and the first execution of each traps once, is written to `RecompTrace.tsv` and runs on (74,064 entries armed
+  in 2 s; the menu loads as fast). `./port decomp <dll> --trace <tsv>` names them. Three traces, launch to the main menu
+  and through every menu screen, give the menu milestone's work list: 1,989 functions from FactoryGame's own .cpp
+  files (745 KB), most of them startup (static initializers, default objects, game instance, the menu map); the menu
+  screens themselves add 160, being mostly UMG and Blueprint.
 - **Running it while away.** `windows/watcher.ps1`, started by the owner in their own session, runs the desktop
   launchers on request from ssh (which cannot show windows), takes screenshots, clicks and types.
 
