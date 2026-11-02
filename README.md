@@ -121,7 +121,10 @@ hides it otherwise. A game's `[env]` table and `--env KEY=VALUE` add or override
 | `./port wine -- <program>` | Runs a program in the prefix (`winecfg`, `regedit`, an installer) |
 | `./port games [id]` | Shows each game's resolved settings and whether it is ready |
 | `./port inspect <game\|folder\|file>` | Static report: engine and version, graphics API, middleware, anti-cheat, code protection in every code file, for Unreal builds the modules by origin and the PDBs shipped, and what each route faces. Reads files only |
-| `./port decomp <dll>` | A module's game functions from its PDB (`--disasm NAME`: one function's disassembly, naming imports, functions and strings; `--type NAME`: a class's layout, members and vtable slots; `--out DIR`: a work folder per module, refused inside this repository; `--match OBJ`: each function of a compiled `.obj` against the shipped one of the same decorated name, relocated operands masked, matched or the first difference). Reads files only |
+| `./port decomp <dll>` | A module's game functions from its PDB (`--disasm NAME`: one function's disassembly, naming imports, functions and strings, with the source line of each instruction, inlined calls by name and fields instead of offsets; `--type NAME`: a class's layout, members and vtable slots; `--out DIR`: a work folder per module, refused inside this repository; `--match OBJ`: each function of a compiled `.obj` against the shipped one of the same decorated name, relocated operands masked, matched or the first difference, and a score, 0 when matched; `--diff NAME` with it: that function side by side; `--trace TSV...`: the functions a hook-loader trace ran, by source file and source span; `--families`: functions grouped by their code). Reads files only |
+| `./port msvc cl\|flags\|mirror\|match\|compare` | MSVC 14.38 under Wine, the game's compiler copied from a Windows PC: `cl` runs it; `flags <obj>` prints the command line an object records and checks it against UBT's response file; `mirror` fetches what only the PC has (UHT's headers, UBT's files) and checks the engine clone against the PC's; `match <staged project> <blob\|File.cpp>...` compiles unity blobs as UBT did and matches them against the shipped module; `compare <obj> <obj>` puts two compiles side by side. Paths are settings in `portkit/config.py` |
+| `./port cdo <tsv> --class <UFGFoo>` | Constructor-body lines from the default objects the hook loader's dump mode wrote (`RecompCDO.tsv`) |
+| `./port permute <staged project> <File.cpp> <Scope::Function>` | Small rewrites of a recovered function, each compiled with `msvc` and scored with `--match`; keeps what scores better, writes the best beside the staged file (`--tries N`, `--minutes M`). Never writes into the recovered-code repository |
 | `./port overlay <game> <dir>` | An overlay game folder: the install linked, files replaced by built ones of the same name (`--dll FILE`, repeatable; its `.pdb` too). Real folders only on the way to a replaced file; never writes to the game, refused inside it or this repository |
 | `./port run <game>` | Plays the game under the Porting Kit (`--kettle`: without Windows Steam; `--overlay DIR`: from an overlay folder, with `--kettle`) |
 | `./port bench <game>` | Benchmarks a scene (`--attach` measures the game already running) |
@@ -185,12 +188,17 @@ instead.
   - `coff.py`: a read-only reader for COFF object files (MSVC, regular and `/bigobj`): functions, code, relocations.
   - `pdb.py`: a read-only PDB reader: its signature, functions (source file, lines, locals), public symbols, and types (class layouts, vtable slots).
   - `decomp.py`: work material for recovering a module's source: its game functions and their annotated disassembly.
+  - `msvc.py`: MSVC under Wine: an object's recorded flags, UBT's response files, the PC-to-Mac path map, the mirror, compiling and comparing.
+  - `cdo.py`: constructor drafts from the default objects of the running game.
+  - `permute.py`: the permuter: textual rewrites of one function, scored by compiling and matching.
   - `overlay.py`: overlay game folders, to run the shipped game with modules built from recovered source.
   - `inspect.py`: the static report.
   - `session.py`, `bench.py`, `trace.py`: running a game, benchmarking it and watching it.
   - `kettle.py`: builds the Kettle bridge and runs games through it.
 - `games/`: one TOML file per game.
 - `wrapper/`: the Steam web helper wrapper (Windows C, built with Zig).
+- `windows/recomp-hooks/`: the hook loader, built into a DLL with recovered functions: hooks them over the shipped ones, and has a trace mode and a dump mode (`RecompDump.txt` next to it: the default objects of the game's classes).
+- `windows/watcher.ps1`: runs the desktop launchers of a Windows PC on request from ssh, with screenshots, clicks and keys.
 - `windows/overlay.ps1`: the Windows counterpart of `./port overlay` (junctions and hard links), for running modules built from recovered source in a copy of the game on a Windows PC.
 - `steam_api/`: our `steam_api64.dll` and its Mac side, on Kettle (`vendor/kettle`, a submodule).
 - `layers/imagelog/`: a Vulkan layer and tools for what a game asks of the driver.

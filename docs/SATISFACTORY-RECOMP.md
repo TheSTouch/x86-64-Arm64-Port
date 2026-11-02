@@ -355,9 +355,42 @@ where (`S_DEFRANGE_*`). The next changes use that, and the running game:
 | 12 | **Work counted in source, not functions.** Functions from the same lines of a game file (template instances, copies of one inline) counted once, templates first | a truer size of the job; one source, several matches |
 | 13 | **Later milestones: stubs that log.** In the native build an unrecovered function is a stub that logs "not recovered: X", and traces of real play pick the work; debug commands, the cheat manager and server-only code may never need recovering | everything that never runs |
 
-Order (decided 2026-11-02, to put in place when the owner is back at the PC): 7 then 8 (Mac only, PDB parsing
-in `pdb.py` and `decomp.py`); then 1 and 2, which make 11 possible; 10 measured before it is built; 9 once the
-game can run; 12 with the next counter; 13 with the native milestones.
+### Done (2026-11-02, batch "Speed")
+
+Items 1, 2, 7, 8, 9, 10, 11 and 12, in three sessions at once: A on the PDB and the disassembly, B on the
+compiler and the running game, C recovering code with them.
+
+| # | Command | Measured |
+|---|---|---|
+| 1 | `./port msvc cl`, `flags <obj>`, `mirror`, `match <staged project> <blob \| File.cpp>`, `compare <obj> <obj>`. MSVC 14.38.33130 (cl 19.38.33145) and SDK 10.0.22621, copied from the PC, run under `runtime/wine11-11.21` with a prefix of their own, no msvc-wine. The flags are UBT's response files, checked against the command line each `/Z7` object records (LF_BUILDINFO); UHT's generated headers and UBT's files are mirrored from the PC at their PC paths (`msvc-mirror/pc`); the engine is the Mac clone, checked by hashing the 1,786 engine headers the PC's compiles read (all identical). The shared PCH is built on the Mac too: with its header only forced, `FKey::operator=` stops being inlined | all 14 blobs of a PC build (c4-b24): the same functions with the same code (1,584, relocations masked) and the same match output (515 matched, 23 differs). A blob in 2 to 31 s (median 11 s), the PCH once in 30 s, all 14 with matching in 2 min 8 s. On the PC, UBT's compile of the same module (`-NoLink`, every blob) took 2 min 31 s, before syncing and fetching |
+| 2 | `./port decomp <dll> --match <obj>` ends each line with a score (instructions not the same once both are aligned; 0 when matched); `--diff NAME` prints the function side by side | one module load (about 3 s for FactoryGame) per run |
+| 7 | `--disasm` shows `; File:line` where the line changes, and `; > inlined X (file:line)` / `; < X` around each inline site | the details of all 38,989 FactoryGame functions in 9 s (438,227 inline sites) |
+| 8 | memory operands named from the PDB: `; this->mCachedOwner`, `; inArgs->_LoadingText.TextData`, `; this->mSlots[1]`, where the PDB says which register holds which typed local | |
+| 9 | `RecompDump.txt` next to the hook DLL: 20 s after the main menu, every property of the default object of each FactoryGame class goes to `RecompCDO.tsv`; `./port cdo <tsv> --class UFGFoo` prints the constructor lines (`mFadeOutTime = 0.25f;`, `PrimaryActorTick.bCanEverTick = true;`), zero defaults left out | one run: 1,203 classes, 7,536 properties (840 KB). The drafts of UFGMenuBase and UFGWidgetSwitcher are C's matched constructors; UFGBaseUI's `mCanDisplayPopup` is no UPROPERTY, so reflection does not see it: such members still come from the disassembly |
+| 10 | `./port decomp <dll> --families [--trace TSV...]`: functions grouped by their code with every number masked, exact and near (90 % of the instructions) | see below; 3 s on the menu path, 25 s on all 41,504 game functions |
+| 11 | `./port permute <staged project> <File.cpp> <Scope::Function> [--tries N] [--minutes M]`: textual rewrites (independent statements swapped, a temporary introduced or removed, an `if` initializer split, an early return or an if/else inverted, a condition, cast or `const` written another way), each compiled with item 1 and scored with item 2; the best five written beside the staged file. Never in the recovered-code repository | 24 to 28 s per candidate. On c4-b24: `UFGUserSetting::ShouldUseCVar` 2 -> 0 with the first candidate (`return UseCVar != 0;`); `GetEffectiveFrameRateLimit` 8 and `GetFGGameInstance` 16 unchanged after 30 minutes each (what differs there is what they inline, or the stack slots of two temporaries) |
+| 12 | `--trace` counts distinct source spans (`file:first-last`, template instances and copies of one inline counted once); `functions.tsv` gains a `span` column | the three menu traces: FactoryGame's own sources 11,181 functions (1,013,268 bytes) in 3,475 spans (786,405 bytes); its `.cpp` files 2,015 functions in 2,012 spans (746,458 bytes), its headers 9,166 functions in 1,463 spans (40,014 bytes) |
+
+**Families (item 10, measured).** Of the 11,181 menu-path game functions (1,013,268 bytes), 10,604 functions and
+352,190 bytes fall in 71 families of 3 or more (139 families of 2 or more: 10,740 functions, 378,359 bytes). Most of
+it is code written once and repeated by the compiler: 8,000 dynamic initializers (272,971 bytes, `FactoryGame.h`'s
+FName and console-variable globals once per unity blob, 6,343 of them one exact family), UHT's `__DefaultConstructor`
+(614) and `StaticClass` (1,216). Inside the game's own `.cpp` files, initializers aside, families hold 235 functions
+(22,883 bytes), the buildable constructors among them. So families save little on the menu path beyond what the
+span count (item 12) already folds; they matter for the buildables later. All 41,504 game functions: 489 families of
+3 or more, 17,388 functions, 958,751 bytes.
+
+**The order of recovery work (session C, 2026-11-02).** Whole unity blobs, whole files: `Project/blob-order.py` in the
+recovered-code repository ranks FactoryGame's blobs by the menu-path bytes not yet recovered (blob 107 first: game
+user settings, game mode, gameplay tags, game instance; then 101, then 95), and every function of the next file of
+the top blob is recovered, traced or not, constructors included (drafted with item 9). Files of one blob change each
+other's inlining, so a half-done file keeps differing (`LoadSettings` matched only once the rest of
+`FGGameUserSettings.cpp` was there). The game runs every fifth batch, through the hook build on the PC and the
+watcher; between runs a batch can be compiled and matched on the Mac (item 1), and the permuter takes what is left
+differing, unattended.
+
+Still to do: 3 (a decompiler draft), 4 (skeletons from the PDB), 5 (systematic differences fixed once) and 13 (stubs
+that log, with the native milestones).
 
 ## Recovery by someone else, without AI
 
@@ -387,7 +420,8 @@ above). Missing before that works:
   that must not be hooked, why only matching functions are hooked).
 - **A work list to pick from**: the menu path by file and size, regenerated from the user's own traces, with
   a way to claim a file.
-- **One command per try**: compile one file and show its differences (items 1 and 2 above).
+- **One command per try**: compile one file and show its differences: `./port msvc match` and `--diff` (items 1
+  and 2 above, done). Without a PC, the toolchain and the mirror still come from a Windows install once.
 
 Someone sitting at the PC does not need the watcher: the desktop launchers do the same.
 
@@ -420,9 +454,8 @@ layers/imagelog/build.sh
 - Diff `5.6.1-CSS` against Epic's 5.6.1 tag (which engine modules Coffee Stain changed), and check that
   its tag matches CL 513885.
 - Build the fork for macOS arm64, and check that VulkanRHI is available there.
-- The matching harness compares, it does not compile: `./port decomp <dll> --match <file.obj>` pairs each
-  function of a compiled object with the shipped one of the same decorated name (the PDB's public symbols;
-  a static function by its qualified name when only one has it), masks the bytes relocations fill, and
-  says matched or where the first difference is, with the shipped instruction there. Still to set up:
-  MSVC 14.38.33130 with the flags UBT passes for `5.6.1-CSS` (on the Windows PC; msvc-wine on the Mac for
-  single files).
+- The matching harness: `./port decomp <dll> --match <file.obj>` pairs each function of a compiled object
+  with the shipped one of the same decorated name (the PDB's public symbols; a static function by its
+  qualified name when only one has it), masks the bytes relocations fill, and says matched or where the
+  first difference is, with a score. `./port msvc match` compiles a blob on the Mac first, with MSVC
+  14.38.33130 under Wine and UBT's own flags ("Making recovery faster", item 1).
