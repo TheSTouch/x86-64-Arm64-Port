@@ -803,17 +803,18 @@ class Types:
             return self.size(struct.unpack_from("<I", body, 4 if kind == LF_ENUM else 0)[0], depth + 1)
         return 0
 
-    def field_path(self, ti, offset, size=None):
+    def field_path(self, ti, offset, size=None, mask=None):
         """The member of type ti at `offset`, read `size` bytes at a time (None: its address is taken):
         "mWidget", "mPair.B", "mSlots[1]", "mWidget+0x2", a base class's member by its name; "" for an access
         covering the whole of ti; None in padding or past the end. A wider access is named by the member it
-        starts at."""
-        if offset == 0 and size is not None and size >= self.size(ti) > 0:
+        starts at. Bitfields are named by the bits the access reaches, their positions from the PDB: those of
+        `mask` (the immediate of a test, and, or) in the bytes at `offset`, else every bit of those bytes."""
+        if offset == 0 and size is not None and size >= self.size(ti) > 0 and mask is None:
             return ""
-        path = self._path(ti, offset, size, 0)
+        path = self._path(ti, offset, size, 0, mask)
         return path.lstrip(".") if path else None
 
-    def _path(self, ti, offset, size, depth):
+    def _path(self, ti, offset, size, depth, mask=None):
         ti = self.resolve(ti)
         kind, body = self.record(ti)
         if depth > 12 or offset < 0:
@@ -822,7 +823,8 @@ class Types:
             each = self.size(struct.unpack_from("<I", body)[0])
             if not each or offset >= self.size(ti):
                 return None
-            return f"[{offset // each}]" + self._inside(struct.unpack_from("<I", body)[0], offset % each, size, depth)
+            return f"[{offset // each}]" + self._inside(struct.unpack_from("<I", body)[0], offset % each, size, depth,
+                                                       mask)
         if kind not in (LF_CLASS, LF_STRUCTURE, LF_UNION):
             return None
         if ti not in self._layouts:
@@ -831,14 +833,31 @@ class Types:
         hits = [(o, n, t) for o, n, t in fields if n and o <= offset < o + max(self.size(t), 1)]
         if hits:
             o, n, t = hits[0]
-            if self.record(t)[0] == LF_BITFIELD:  # bitfields share their bytes
-                names = [n2 for o2, n2, t2 in hits if o2 == o and self.record(t2)[0] == LF_BITFIELD]
-                n = "|".join(names[:4]) + ("|..." if len(names) > 4 else "")
-            return "." + n + self._inside(t, offset - o, size, depth)
+            if self.record(t)[0] == LF_BITFIELD:  # bitfields share their bytes: those whose bits it reaches
+                names = self._bits([(n2, t2) for o2, n2, t2 in hits if o2 == o], offset - o, size, mask)
+                return "." + "|".join(names[:4]) + ("|..." if len(names) > 4 else "") if names else None
+            return "." + n + self._inside(t, offset - o, size, depth, mask)
         for o, n, t in fields:
             if n is None and o is not None and o <= offset < o + self.size(t):
-                return self._path(t, offset - o, size, depth + 1)
+                return self._path(t, offset - o, size, depth + 1, mask)
         return None
+
+    def _bits(self, members, offset, size, mask):
+        """The bitfields of one storage unit [(name, type)] that an access `offset` bytes into it reaches."""
+        if mask is not None:
+            bits = mask << 8 * offset
+        elif size:
+            bits = ((1 << 8 * size) - 1) << 8 * offset
+        else:
+            bits = -1  # the address of them all
+        out = []
+        for name, ti in members:
+            kind, body = self.record(ti)
+            if kind == LF_BITFIELD:
+                _, length, position = struct.unpack_from("<IBB", body)
+                if bits >> position & ((1 << length) - 1):
+                    out.append(name)
+        return out
 
     def member_at(self, ti, offset, depth=0):
         """(path, type index) of the member that starts at `offset` and holds no member of its own there:
@@ -859,12 +878,12 @@ class Types:
                 return (n, t) if o == offset else None
         return None
 
-    def _inside(self, ti, offset, size, depth):
+    def _inside(self, ti, offset, size, depth, mask=None):
         """What follows a member's name: nothing when the access covers the whole member, else the field
         inside it, else +offset."""
-        if offset == 0 and (size is None or size >= self.size(ti)):
+        if offset == 0 and (size is None or size >= self.size(ti)) and mask is None:
             return ""
-        return self._path(ti, offset, size, depth + 1) or (f"+{offset:#x}" if offset else "")
+        return self._path(ti, offset, size, depth + 1, mask) or (f"+{offset:#x}" if offset else "")
 
     def vtable(self, name, depth=0):
         """{vtable offset: "Class::method(args)"} for the primary vtable, bases first, from introducing virtuals."""

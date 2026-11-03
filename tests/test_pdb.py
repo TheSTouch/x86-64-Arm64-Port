@@ -191,6 +191,19 @@ def build_tpi():
         leaf(0x1505, struct.pack("<HHIIIH", 2, 0, 0x1009, 0, 0, 8) + b"FPair\0"),
         # 0x100B: int[3]
         leaf(0x1503, struct.pack("<IIH", 0x74, 0x23, 12) + b"\0"),
+        # 0x100C-0x1010: bitfields (type, bits, position): uint8 A:1 at 0, B:2 at 1, C:1 at 5; uint32 D:3 at 9,
+        # E:1 at 20
+        leaf(0x1205, struct.pack("<IBB", 0x20, 1, 0)), leaf(0x1205, struct.pack("<IBB", 0x20, 2, 1)),
+        leaf(0x1205, struct.pack("<IBB", 0x20, 1, 5)), leaf(0x1205, struct.pack("<IBB", 0x75, 3, 9)),
+        leaf(0x1205, struct.pack("<IBB", 0x75, 1, 20)),
+        # 0x1011: FFlags's field list: A, B, C in the byte at +0, D and E in the dword at +4
+        leaf(0x1203, sub(0x150D, struct.pack("<HIH", 3, 0x100C, 0) + b"A\0")
+             + sub(0x150D, struct.pack("<HIH", 3, 0x100D, 0) + b"B\0")
+             + sub(0x150D, struct.pack("<HIH", 3, 0x100E, 0) + b"C\0")
+             + sub(0x150D, struct.pack("<HIH", 3, 0x100F, 4) + b"D\0")
+             + sub(0x150D, struct.pack("<HIH", 3, 0x1010, 4) + b"E\0")),
+        # 0x1012: struct FFlags, size 8
+        leaf(0x1505, struct.pack("<HHIIIH", 5, 0, 0x1011, 0, 0, 8) + b"FFlags\0"),
     ]
     data = b"".join(records)
     header = struct.pack("<IIIII", 20040203, 56, T, T + len(records), len(data)) + b"\0" * 36
@@ -265,6 +278,20 @@ class PDBTest(unittest.TestCase):
         self.assertEqual(t.member_at(0x1004, 0x24), ("mPair.B", 0x74))
         self.assertEqual(t.member_at(0x1004, 8), ("Count", 0x74))
         self.assertIsNone(t.member_at(0x1004, 0x42))
+
+    def test_bitfields_named_by_the_bits_an_access_reaches(self):
+        t = pdb.Types(self.write(build_pdb()))
+        flags = 0x1012
+        self.assertEqual(t.field_path(flags, 0, 1), "A|B|C")              # every bit of the byte
+        self.assertEqual(t.field_path(flags, 0, 1, mask=0x20), "C")       # test byte ptr [x], 0x20
+        self.assertEqual(t.field_path(flags, 0, 1, mask=0x04), "B")
+        self.assertEqual(t.field_path(flags, 0, 1, mask=0x03), "A|B")
+        self.assertIsNone(t.field_path(flags, 0, 1, mask=0x40))           # a bit no field has
+        self.assertEqual(t.field_path(flags, 5, 1, mask=0x02), "D")       # bit 9 of the dword at +4
+        self.assertEqual(t.field_path(flags, 6, 1, mask=0x10), "E")       # bit 20
+        self.assertEqual(t.field_path(flags, 5, 1), "D")                  # bits 8-15
+        self.assertEqual(t.field_path(flags, 4, 4), "D|E")
+        self.assertEqual(t.field_path(flags, 4, None), "D|E")             # lea: the address of them all
 
     def test_variables_and_where_they_live(self):
         path = self.write(build_pdb(fields=True))

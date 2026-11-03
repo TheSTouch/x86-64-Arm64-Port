@@ -182,34 +182,51 @@ class _Fields:
             if reg in REGISTERS:
                 disp = (-1 if sign == "-" else 1) * int(disp, 0) if disp else 0
                 store = hit.start() == 0 and not mnemonic.startswith(("cmp", "test", "push", "bt", "ucomis", "comis"))
+                mask = _mask(mnemonic, operands, ACCESS.get(size)) if hit.start() == 0 else None
                 name = self._name(offset, REGISTERS[reg], disp, None if mnemonic == "lea" else ACCESS.get(size),
-                                  after if store else None)
+                                  after if store else None, mask)
                 if name:
                     out.append(("&" if mnemonic == "lea" else "") + name)
         return out
 
-    def _name(self, offset, reg, disp, size, after):
+    def _name(self, offset, reg, disp, size, after, mask=None):
         t = self.types
         for v in self.variables:
             for kind, r, at, ranges in v.homes:
                 if r != reg or not any(a <= offset < b for a, b in ranges):
                     continue
                 if kind == "register" and (target := t.pointee(v.type_index)):
-                    if path := t.field_path(target, disp, size):
+                    if path := t.field_path(target, disp, size, mask):
                         return f"{v.name}->{path}"
                 elif kind == "field" and (held := t.member_at(v.type_index, at)):
-                    if (target := t.pointee(held[1])) and (path := t.field_path(target, disp, size)):
+                    if (target := t.pointee(held[1])) and (path := t.field_path(target, disp, size, mask)):
                         return f"{_join(v.name, held[0])}->{path}"
                 elif kind == "memory" and 0 <= disp - at < max(t.size(v.type_index), 1):
                     if after is not None and not any(a <= after < b for a, b in ranges):
                         continue  # a store that ends the variable's life there: what it writes is something else
-                    path = t.field_path(v.type_index, disp - at, size)
+                    path = t.field_path(v.type_index, disp - at, size, mask)
                     if path:
                         return _join(v.name, path)
                     return v.name + (f"+{disp - at:#x}" if path is None and disp != at else "")
-        if reg == REGISTERS["rcx"] and offset <= self.entry and (path := t.field_path(self.this, disp, size)):
+        if reg == REGISTERS["rcx"] and offset <= self.entry and (path := t.field_path(self.this, disp, size, mask)):
             return f"this->{path}"
         return None
+
+
+def _mask(mnemonic, operands, size):
+    """The bits an instruction on memory (its first operand, `size` bytes) tests or changes, from its immediate:
+    test, or, xor: the bits set; and: those it clears; bt, bts, btr, btc: the bit numbered. None otherwise."""
+    hit = re.fullmatch(r".*\],\s*(-?(?:0x[0-9a-f]+|\d+))", operands.strip())
+    if not hit or not size:
+        return None
+    value, every = int(hit.group(1), 0), (1 << 8 * size) - 1
+    if mnemonic in ("test", "or", "xor"):
+        return value & every
+    if mnemonic == "and":
+        return ~value & every
+    if mnemonic in ("bt", "bts", "btr", "btc"):
+        return 1 << value % (8 * size)
+    return None
 
 
 def _join(name, path):

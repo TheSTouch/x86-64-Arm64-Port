@@ -97,6 +97,19 @@ class DecompTest(unittest.TestCase):
             "+0002a": "",               # a store ending Copy's range: what it writes is no longer Copy
             "+0002e": ""})
 
+    def test_the_bits_an_instruction_reaches(self):
+        self.assertEqual(decomp._mask("test", "byte ptr [rbx + 0x2b], 0x20", 1), 0x20)
+        self.assertEqual(decomp._mask("or", "byte ptr [rbx + 0x2b], 0x3", 1), 0x3)
+        self.assertEqual(decomp._mask("xor", "byte ptr [rbx], 0x80", 1), 0x80)
+        self.assertEqual(decomp._mask("and", "byte ptr [rbx + 0x2b], 0xdf", 1), 0x20)    # the bits it clears
+        self.assertEqual(decomp._mask("and", "dword ptr [rbx], 0xfffffeff", 4), 0x100)
+        self.assertEqual(decomp._mask("and", "dword ptr [rbx], -0x101", 4), 0x100)
+        self.assertEqual(decomp._mask("bt", "dword ptr [rbx], 0x9", 4), 0x200)
+        self.assertEqual(decomp._mask("btr", "word ptr [rbx], 0x11", 2), 0x2)
+        self.assertIsNone(decomp._mask("test", "byte ptr [rbx], al", 1))                # no immediate
+        self.assertIsNone(decomp._mask("cmp", "byte ptr [rbx], 0x20", 1))               # a value, not bits
+        self.assertIsNone(decomp._mask("test", "al, 0x20", None))
+
     @unittest.skipUnless(shutil.which("objdump"), "needs objdump (Xcode command line tools)")
     def test_jumps_inside_the_function_read_as_offsets(self):
         data = bytearray(self.dll.read_bytes())
