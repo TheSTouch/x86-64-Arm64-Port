@@ -472,7 +472,8 @@ def parser():
                     "constants; repeatable, each function under `; NAME`")
     sp.add_argument("--callers", metavar="NAME", help="the functions of the module that call this one (or jump to it), "
                     "and whether each was compiled in the same unity blob")
-    sp.add_argument("--out", metavar="DIR", help="write functions.tsv and one .asm per function (outside this repository)")
+    sp.add_argument("--out", metavar="DIR", help="write functions.tsv and one .asm per function (outside this repository); "
+                    "with --source F, F's functions listed in functions.F.tsv, the module-wide list kept")
     sp.add_argument("--match", metavar="OBJ", help="compare each function of a compiled .obj with the shipped one "
                     "(relocated operands masked): matched, or the first difference; each line ends with a score, "
                     "the instructions not the same once both are aligned")

@@ -479,7 +479,9 @@ def span(f):
 
 
 def dump(dll, out, source_marker=None):
-    """One folder per module, holding functions.tsv and one .asm per game function, by source file."""
+    """One folder per module, holding functions.tsv and one .asm per game function, by source file. With
+    source_marker, its functions only, listed in functions.<marker>.tsv: the module-wide list stays. A run
+    replaces the .asm files it writes; two functions of one name in one file: the second as NAME@rva."""
     if config.inside_repository(out):
         raise Fail(f"{out} is inside this repository; game-derived material stays outside it")
     m = Module(dll)
@@ -487,6 +489,7 @@ def dump(dll, out, source_marker=None):
     root = Path(out) / module
     root.mkdir(parents=True, exist_ok=True)
     rows = ["name\trva\tlength\tsource\tfirst_line\tlast_line\tlocals\tmangled\tspan"]
+    written = set()
     for f in (fns := m.game_functions(source_marker)):
         source = Path(f.source.replace("\\", "/")).name
         rows.append("\t".join([f.name, f"{m.rva(f.segment, f.offset):#x}", str(f.length), source,
@@ -494,10 +497,12 @@ def dump(dll, out, source_marker=None):
         folder = root / source
         folder.mkdir(exist_ok=True)
         target = folder / f"{_safe(f.name)}.asm"
-        if target.exists():
+        if target in written:
             target = folder / f"{_safe(f.name)}@{m.rva(f.segment, f.offset):x}.asm"
+        written.add(target)
         target.write_text(m.disassemble(f), encoding="utf-8")
-    (root / "functions.tsv").write_text("\n".join(rows) + "\n", encoding="utf-8")
+    index = f"functions.{_safe(source_marker)}.tsv" if source_marker else "functions.tsv"
+    (root / index).write_text("\n".join(rows) + "\n", encoding="utf-8")
     return root, fns
 
 

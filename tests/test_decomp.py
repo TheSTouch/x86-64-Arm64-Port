@@ -244,12 +244,24 @@ class DecompTest(unittest.TestCase):
     @unittest.skipUnless(shutil.which("objdump"), "needs objdump (Xcode command line tools)")
     def test_dump_writes_one_folder_per_source_file(self):
         out = self.dir / "work"
-        decomp.dump(self.dll, out, "\\Game\\Source\\")
+        decomp.dump(self.dll, out)
         index = (out / "Game-Screen" / "functions.tsv").read_text()
         self.assertTrue(index.startswith("name\trva\tlength\tsource\tfirst_line\tlast_line\tlocals\tmangled\tspan\n"))
         self.assertIn("FGScreen::Construct\t0x1010\t64\tScreen.cpp\t20\t27", index)
         self.assertIn("\tD:\\Game\\Source\\Game\\Private\\Screen.cpp:20-27\n", index)  # the span, last
         self.assertTrue((out / "Game-Screen" / "Screen.cpp" / "FGScreen__Construct.asm").is_file())
+
+    def test_dump_of_one_source_keeps_the_module_wide_list(self):
+        # --source F writes its own list beside the module's; a second run replaces its files, no NAME@rva copies
+        out = self.dir / "work"
+        decomp.dump(self.dll, out)
+        whole = (out / "Game-Screen" / "functions.tsv").read_text()
+        for _ in range(2):
+            decomp.dump(self.dll, out, "Screen.cpp")
+        self.assertEqual((out / "Game-Screen" / "functions.tsv").read_text(), whole)
+        self.assertIn("FGScreen::Construct", (out / "Game-Screen" / "functions.Screen.cpp.tsv").read_text())
+        self.assertEqual(sorted(p.name for p in (out / "Game-Screen" / "Screen.cpp").iterdir()),
+                         ["FGScreen__Construct.asm"])
 
 
 class FamiliesTest(unittest.TestCase):
