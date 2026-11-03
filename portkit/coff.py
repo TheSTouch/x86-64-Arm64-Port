@@ -41,6 +41,7 @@ class Function:
     name: str
     code: bytes
     masked: set   # offsets (from the function's start) of bytes a relocation fills
+    targets: dict = field(default_factory=dict)   # offset of each relocated field -> the symbol it names
 
 
 @dataclass
@@ -56,16 +57,19 @@ class Object:
             if number > 0 and kind == DTYPE_FUNCTION and storage in (2, 3) and not name.startswith("$"):
                 if self.sections[number - 1].code:
                     starts.setdefault(number, []).append((value, name))
+        names = {index: name for index, name, *_ in self.symbols}
         out = []
         for number, entries in sorted(starts.items()):
             s = self.sections[number - 1]
             entries.sort()
             for i, (value, name) in enumerate(entries):
                 end = entries[i + 1][0] if i + 1 < len(entries) else len(s.data)
-                masked = set()
-                for off, _, kind in s.relocations:
+                masked, targets = set(), {}
+                for off, symbol, kind in s.relocations:
                     masked.update(o - value for o in range(off, off + RELOC_SIZE.get(kind, 0)) if value <= o < end)
-                out.append(Function(name, s.data[value:end], masked))
+                    if value <= off < end:
+                        targets[off - value] = names.get(symbol)
+                out.append(Function(name, s.data[value:end], masked, targets))
         return out
 
 

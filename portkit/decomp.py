@@ -55,7 +55,7 @@ class Module:
         self.functions = pdb.functions(self.pdb)
         self.names = {self.rva(s, o): n for (s, o), n in pdb.publics(self.pdb).items() if 0 < s <= len(self.image.sections)}
         self.names.update({self.rva(f.segment, f.offset): f.name for f in self.functions})
-        self._types = self._details = None
+        self._types = self._details = self._symbols = None
 
     @property
     def types(self):
@@ -71,6 +71,16 @@ class Module:
 
     def rva(self, segment, offset):
         return self.image.sections[segment - 1].vaddr + offset
+
+    def rva_of(self, symbol):
+        """The RVA in the shipped module of what a compiled object's symbol names: an import's slot in the
+        import address table (__imp_X), else the public symbol's or the function's address; None if unknown."""
+        if self._symbols is None:
+            self._symbols = {f.mangled: self.rva(f.segment, f.offset) for f in self.functions if f.mangled}
+            self._symbols.update({n: self.rva(s, o) for n, s, o, _ in pdb.public_symbols(self.pdb)
+                                  if 0 < s <= len(self.image.sections)})
+            self._symbols.update({"__imp_" + n.rpartition("!")[2]: rva for rva, n in self.image.iat.items()})
+        return self._symbols.get(symbol)
 
     def function(self, name):
         for f in self.functions:
@@ -461,6 +471,7 @@ class Match:
     detail: str = ""
     score: int = None    # instructions not the same once aligned: 0 when matched, None when missing
     rows: list = field(default_factory=list)   # the alignment: (mark, (offset, shipped) or None, (offset, ours) or None)
+    verdict: str = ""    # what the differences amount to, when the alignment tells (diff_listing)
 
 
 def match_line(r):
@@ -472,11 +483,14 @@ def match_line(r):
 
 def diff_listing(r):
     """The shipped and compiled disassembly side by side: `=` the same, `!` changed, `<` shipped only, `>` ours
-    only; relocated operands as <reloc>. Ends with `score <n>`."""
+    only; relocated operands as <reloc>. Ends with `verdict: ...` when the alignment tells what the differences
+    amount to (_verdict), then `score <n>`."""
     out = [f"; {r.name}  [{r.shipped}]: {r.state}" + (f", {r.detail}" if r.detail else "")]
     for mark, left, right in r.rows:
         left = f"+{left[0]:05x}  {left[1]}" if left else ""
         out.append(f"{mark} {left:<59} {f'+{right[0]:05x}  {right[1]}' if right else ''}".rstrip())
+    if r.verdict:
+        out.append(f"verdict: {r.verdict}")
     out.append(f"score {r.score}")
     return "\n".join(out) + "\n"
 
@@ -658,6 +672,240 @@ def _align(m, pairs):
             r.score = 0  # the bytes decide: a listing may show an operand only one side relocates
         elif not r.score:
             r.score = 1  # bytes differ where the text does not (another encoding of the same instruction)
+        if r.state == "differs":
+            calls = ([(o, x[1], _shipped_call(m, f, t, o, n, len(blobs[2 * i]))) for (o, n, t), x
+                      in zip(listings[2 * i], theirs)],
+                     [(o, x[1], _our_call(m, fn, t, o, n)) for (o, n, t), x in zip(listings[2 * i + 1], ours)])
+            r.verdict = _verdict(m, f, calls, sm.get_opcodes(), rows)
+
+
+def _verdict(m, f, calls, opcodes, rows):
+    """One line on what the differences of an aligned pair amount to: "registers only", "stack slots only"
+    (the same instructions once renamed consistently); "register allocation only" (the same once copies,
+    spills and nops are left out and registers masked); "inlined here, called there: X" or the reverse;
+    else the first differing source line, the first difference register allocation does not explain, and
+    how many instructions it does not explain. "" when unsure. calls: per side [(offset, shown, call)]."""
+    theirs, ours = calls
+    plain = [x[:2] for x in theirs], [x[:2] for x in ours]
+    if renamed := _renamed(*plain):
+        return renamed
+    same, offset, others = _allocation(*plain)
+    if same:
+        return "register allocation only"
+    detail = m.details.detail(f) if f.module != 0xFFFF else None
+    if inlined := _inlined(theirs, ours, opcodes, detail.inlines if detail else ()):
+        return inlined
+    if offset is None:
+        first = next((i for i, (mark, *_) in enumerate(rows) if mark != "="), None)
+        offset = None if first is None else next((left[0] for _, left, _ in rows[first:] if left), None)
+    line = _first_line(offset, detail, f.source)
+    if line and others:
+        line += f"; {others} instruction{'s differ' if others > 1 else ' differs'} besides register allocation"
+    return line
+
+
+def _register_table():
+    out = {}
+    for x in "abcd":
+        out.update({f"r{x}x": (x, 64), f"e{x}x": (x, 32), f"{x}x": (x, 16), f"{x}l": (x, 8), f"{x}h": (x, 0)})
+    for x in ("si", "di", "bp", "sp"):
+        out.update({f"r{x}": (x, 64), f"e{x}": (x, 32), x: (x, 16), f"{x}l": (x, 8)})
+    for n in range(8, 16):
+        out.update({f"r{n}": (f"r{n}", 64), f"r{n}d": (f"r{n}", 32), f"r{n}w": (f"r{n}", 16), f"r{n}b": (f"r{n}", 8)})
+    for n in range(32):
+        out.update({f"xmm{n}": (f"v{n}", 128), f"ymm{n}": (f"v{n}", 256), f"zmm{n}": (f"v{n}", 512)})
+    return out
+
+
+FAMILY = _register_table()
+SLOT = r"\[(?:rsp|rbp)(?: \+ 0x[0-9a-f]+)?\]"
+TOKENS = re.compile(f"({SLOT}|\\b(?:{'|'.join(sorted(FAMILY, key=len, reverse=True))})\\b)")
+LOCAL_BRANCH = re.compile(r"^(j\w+|call|loop\w*) \+([0-9a-f]{5})$")
+
+
+def _renamed(theirs, ours):
+    """"registers only", "stack slots only" or both when two listings [(offset, shown)] have the same
+    instructions once registers (by family, the same width) or stack slots ([rsp + n], [rbp + n]) are renamed
+    one to one; branches inside the function compare by the instruction they reach. None otherwise."""
+    if len(theirs) != len(ours) or not theirs:
+        return None
+    a, b = _indexed(theirs), _indexed(ours)
+    if a == b:
+        return None
+    for registers, slots, verdict in ((True, False, "registers only"), (False, True, "stack slots only"),
+                                      (True, True, "registers and stack slots only")):
+        if _same_renamed(a, b, registers, slots):
+            return verdict
+    return None
+
+
+def _indexed(listing):
+    at = {o: i for i, (o, _) in enumerate(listing)}
+    out = []
+    for _, text in listing:
+        hit = LOCAL_BRANCH.match(text)
+        out.append(f"{hit.group(1)} #{at.get(int(hit.group(2), 16), '?')}" if hit else text)
+    return out
+
+
+def _same_renamed(a, b, registers, slots):
+    maps = ({}, {}), ({}, {})  # registers, slots: each one to one, both ways
+    for x, y in zip(a, b):
+        px, py = TOKENS.split(x), TOKENS.split(y)
+        if len(px) != len(py):
+            return False
+        for k, (u, v) in enumerate(zip(px, py)):
+            if k % 2 == 0 or u == v:
+                if u != v:
+                    return False
+                if k % 2 and not _bind(maps[u.startswith("[")], u, v):  # the same token also binds
+                    return False
+                continue
+            slot = u.startswith("[")
+            if slot != v.startswith("[") or not (slots if slot else registers):
+                return False
+            if slot and u[:4] != v[:4]:
+                return False  # rsp and rbp are not one another's
+            if not slot:
+                if FAMILY[u][1] != FAMILY[v][1]:
+                    return False
+                u, v = FAMILY[u][0], FAMILY[v][0]
+            if not _bind(maps[slot], u, v):
+                return False
+    return True
+
+
+def _bind(pair, u, v):
+    if u in FAMILY and v in FAMILY:
+        u, v = FAMILY[u][0], FAMILY[v][0]
+    forward, back = pair
+    if forward.setdefault(u, v) != v or back.setdefault(v, u) != u:
+        return False
+    return True
+
+
+MOVES = {"mov", "movaps", "movups", "movapd", "movupd", "movsd", "movss", "movq", "movd", "movdqa", "movdqu"}
+STACK = re.compile(r"\[(?:rsp|rbp)(?: [+-] 0x[0-9a-f]+)?\]")
+
+
+def _allocation(theirs, ours):
+    """(same, first, others) for two listings [(offset, shown)] once what register allocation changes is left
+    out: copies between registers, spills and reloads, nops; registers masked to their width, stack slots
+    and branch targets masked, lea r, [r + n] read as add r, n. same: nothing else differs; first: the
+    shipped offset of the first other difference; others: how many instructions differ besides."""
+    a = [(o, x) for o, t in theirs if (x := _allocated(t))]
+    b = [(o, x) for o, t in ours if (x := _allocated(t))]
+    blocks = [op for op in difflib.SequenceMatcher(None, [x for _, x in a], [x for _, x in b],
+                                                   autojunk=False).get_opcodes() if op[0] != "equal"]
+    if not blocks:
+        return True, None, 0
+    _, i1, _, _, _ = blocks[0]
+    first = a[i1][0] if i1 < len(a) else (a[-1][0] if a else None)
+    return False, first, sum(max(i2 - i1, j2 - j1) for _, i1, i2, j1, j2 in blocks)
+
+
+def _allocated(text):
+    mnemonic, _, operands = text.partition(" ")
+    if mnemonic.startswith("nop") or mnemonic == "int3":
+        return None
+    parts = [o.strip() for o in operands.split(",")] if operands else []
+    if mnemonic in MOVES and len(parts) == 2:
+        a, b = parts
+        if (a in FAMILY or STACK.search(a)) and (b in FAMILY or STACK.search(b)) and (a in FAMILY or b in FAMILY):
+            return None  # a copy, a spill or a reload
+    if mnemonic == "lea" and (hit := re.fullmatch(r"(\w+), \[(\w+) \+ (0x[0-9a-f]+)\]", operands)) \
+            and hit.group(2) in FAMILY:
+        mnemonic, operands = "add", f"{hit.group(1)}, {hit.group(3)}"
+    if LOCAL_BRANCH.match(text):
+        return mnemonic + " #"
+    operands = TOKENS.sub(lambda t: t.group(0) if t.group(0).startswith("[") else f"r{FAMILY[t.group(0)][1]}",
+                          STACK.sub("[stack]", operands))
+    return f"{mnemonic} {operands}"
+
+
+def _inlined(theirs, ours, opcodes, inlines=()):
+    """"inlined here, called there: X" where the shipped code (theirs) calls X and ours, which never calls X,
+    has as many instructions or more there and no call; "called here, inlined there: Y" where ours calls what
+    the shipped code never calls, and the shipped code has an inline site there (the PDB's), named Y. Lists of
+    (offset, shown, call): call is (key, name) or None. The compiler's helpers (__security_check_cookie,
+    _guard_dispatch_icall...) are never inlined: a call to one is no evidence. None when neither."""
+    called = ({c[0] for *_, c in theirs if c}, {c[0] for *_, c in ours if c})
+    theirs = [(o, t, c if c and not c[1].startswith(("__", "_guard")) else None) for o, t, c in theirs]
+    ours = [(o, t, c if c and not c[1].startswith(("__", "_guard")) else None) for o, t, c in ours]
+    here, there = [], []
+    for tag, i1, i2, j1, j2 in opcodes:
+        if tag == "equal":
+            continue
+        left, right = theirs[i1:i2], ours[j1:j2]
+        if right and len(right) >= len(left) and not any(c for *_, c in right):
+            here += [c[1] for *_, c in left if c and c[0] not in called[1]]
+        if left and len(left) >= len(right) and not any(c for *_, c in left):
+            site = _outermost(inlines, [o for o, *_ in left])
+            if site and any(c and c[0] not in called[0] for *_, c in right):
+                there.append(site.name)
+    out = []
+    if here:
+        out.append("inlined here, called there: " + ", ".join(list(dict.fromkeys(here))[:3]))
+    if there:
+        out.append("called here, inlined there: " + ", ".join(list(dict.fromkeys(there))[:3]))
+    return "; ".join(out) or None
+
+
+def _outermost(inlines, offsets):
+    sites = [s for s in inlines if any(a <= o < b for a, b, *_ in s.ranges for o in offsets)]
+    return min(sites, key=lambda s: s.depth) if sites else None
+
+
+def _first_line(offset, detail, source):
+    """"first difference at File.cpp:<line>" for a shipped offset, from the function's line table (its own
+    source file first), with the inline site the code is in; "" without line information."""
+    if offset is None or detail is None:
+        return ""
+    lines = [x for x in detail.lines if x[1] == source and x[0] <= offset] or \
+        [x for x in detail.lines if x[1] and x[0] <= offset]
+    if not lines:
+        return ""
+    _, file, line = lines[-1]
+    site = _outermost(detail.inlines, [offset])
+    return f"first difference at {_base(file)}:{line}" + (f", in inlined {site.name}" if site else "")
+
+
+CALL = re.compile(r"^(call|jmp) (?:qword ptr \[rip(?: ([+-]) (0x[0-9a-f]+))?\]|(0x[0-9a-f]+))$")
+
+
+def _shipped_call(m, f, text, offset, length, size):
+    """(RVA, name) of what a shipped instruction calls, or jumps to out of the function (a tail call)."""
+    hit = CALL.match(" ".join(re.sub(r"\s*<[^>]*>", "", text).partition(" # ")[0].split()))
+    if not hit:
+        return None
+    start = m.rva(f.segment, f.offset)
+    if hit.group(4):
+        target = int(hit.group(4), 16)
+        if 0 <= target < size:
+            return None
+        rva = start + target
+    else:
+        rva = start + offset + length + (-1 if hit.group(2) == "-" else 1) * int(hit.group(3) or "0", 16)
+    return rva, _short(m.label(rva) or f"{rva:#x}")
+
+
+def _our_call(m, fn, text, offset, length):
+    """(RVA in the shipped module, or the symbol, and a name) of what a compiled instruction calls."""
+    if not CALL.match(" ".join(re.sub(r"\s*<[^>]*>", "", text).partition(" # ")[0].split())):
+        return None
+    symbol = fn.targets.get(offset + length - 4)
+    if symbol is None:
+        return None
+    rva = m.rva_of(symbol)
+    if rva is None:
+        return ("symbol", symbol), _short(symbol)
+    return rva, _short(m.label(rva) or symbol)
+
+
+def _short(name):
+    """A callee's name for a verdict: an import without its DLL, a decorated name undecorated where it can be."""
+    name = name.rpartition("!")[2].removeprefix("__imp_")
+    return (qualified_name(name) or scoped_name(name) or name) if name.startswith("?") else name
 
 
 BRANCH = re.compile(r"^(j\w+|call|loop\w*) (0x[0-9a-f]+)$")

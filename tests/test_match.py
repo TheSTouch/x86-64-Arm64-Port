@@ -76,6 +76,7 @@ class CoffTest(unittest.TestCase):
             self.assertEqual(f.name, CONSTRUCT)
             self.assertEqual(f.code, shipped_body())
             self.assertEqual(f.masked, {2, 3, 4, 5, 9, 10, 11, 12})
+            self.assertEqual(f.targets, {2: "__imp_X", 9: "__imp_X"})
 
     def test_not_an_object(self):
         with self.assertRaises(coff.NotCOFF):
@@ -174,6 +175,28 @@ class MatchTest(unittest.TestCase):
         self.assertEqual([row[0] for row in r.rows].count("!"), 1)
 
     @unittest.skipUnless(shutil.which("objdump"), "needs objdump (Xcode command line tools)")
+    def test_verdicts_of_the_listing(self):
+        body = bytearray(shipped_body())
+        body[8] = 0x15          # lea rdx instead of lea rcx
+        obj = self.dir / "Screen.cpp.obj"
+        obj.write_bytes(build_obj([(CONSTRUCT, bytes(body), [(2, 4), (9, 4)])]))
+        (r,) = decomp.match(self.dll, obj, diff=[CONSTRUCT])
+        self.assertEqual(r.verdict, "registers only")
+        self.assertIn("\nverdict: registers only\nscore 1", decomp.diff_listing(r))
+        # ExitProcess's call replaced by code of its own: what the shipped module calls, ours has inline
+        body = b"\x31\xc0" + b"\xb9\x01\0\0\0" + shipped_body()[6:]
+        obj.write_bytes(build_obj([(CONSTRUCT, body[:0x40], [(10, 4)])]))
+        (r,) = decomp.match(self.dll, obj, diff=[CONSTRUCT])
+        self.assertEqual(r.verdict, "inlined here, called there: ExitProcess")
+        # anything else: the first differing source line
+        body = bytearray(shipped_body())
+        body[0x0d] = 0x90
+        obj.write_bytes(build_obj([(CONSTRUCT, bytes(body), [(2, 4), (9, 4)])]))
+        (r,) = decomp.match(self.dll, obj, diff=[CONSTRUCT])
+        self.assertEqual(r.verdict, "first difference at Screen.cpp:21, in inlined Screen::Reset; 1 instruction "
+                                    "differs besides register allocation")
+
+    @unittest.skipUnless(shutil.which("objdump"), "needs objdump (Xcode command line tools)")
     def test_jumps_inside_the_function_compare_by_displacement(self):
         jumps = b"\x74\x02" + b"\x90\x90" + b"\xc3"     # je over two nops
         shifted = b"\x90" + jumps                          # one more instruction before: same jump bytes
@@ -250,6 +273,51 @@ class MatchTest(unittest.TestCase):
         self.assertEqual(decomp.pair_scoped(["??__EGScreens@@YAXXZ"], shipped), {})
         pairs = decomp.pair_scoped(["??__EGScreens@@YAXXZ"], shipped, "Module.Game.2.cpp.obj")
         self.assertEqual(pairs["??__EGScreens@@YAXXZ"].offset, 0x20)
+
+    def test_renamed_registers_and_stack_slots(self):
+        theirs = [(0, "mov rax, qword ptr [rcx + 0x8]"), (4, "add eax, edx"), (6, "je +0000a"), (8, "nop"), (0xa, "ret")]
+        ours = [(0, "mov r8, qword ptr [rcx + 0x8]"), (4, "add r8d, edx"), (7, "je +0000b"), (9, "nop"), (0xb, "ret")]
+        self.assertEqual(decomp._renamed(theirs, ours), "registers only")
+        self.assertIsNone(decomp._renamed([(0, "mov rax, rcx"), (3, "mov rdx, rcx")],
+                                          [(0, "mov rax, rcx"), (3, "mov rax, rcx")]))   # rax and rdx both rax
+        self.assertIsNone(decomp._renamed([(0, "mov eax, ecx")], [(0, "mov rax, rcx")]))  # another width
+        self.assertIsNone(decomp._renamed([(0, "je +00002"), (2, "nop"), (3, "ret")],
+                                          [(0, "je +00003"), (2, "nop"), (3, "ret")]))  # another target
+        stack = [(0, "mov qword ptr [rsp + 0x20], rax"), (5, "mov rcx, qword ptr [rsp + 0x28]")]
+        swapped = [(0, "mov qword ptr [rsp + 0x28], rax"), (5, "mov rcx, qword ptr [rsp + 0x20]")]
+        self.assertEqual(decomp._renamed(stack, swapped), "stack slots only")
+        both = [(0, "mov qword ptr [rsp + 0x28], rdx"), (5, "mov rcx, qword ptr [rsp + 0x20]")]
+        self.assertEqual(decomp._renamed(stack, both), "registers and stack slots only")
+        self.assertIsNone(decomp._renamed(stack, stack[:1]))
+
+    def test_register_allocation_only(self):
+        # this kept in rsi there, a callee-saved register spilled here: the same computation
+        theirs = [(0, "mov rsi, rcx"), (3, "mov eax, dword ptr [rsi + 0x8]"), (6, "add rsi, 0x10"), (0xa, "ret")]
+        ours = [(0, "mov qword ptr [rsp + 0x8], rbx"), (5, "mov eax, dword ptr [rcx + 0x8]"),
+                (8, "lea rbx, [rcx + 0x10]"), (0xc, "nop"), (0xd, "ret")]
+        self.assertEqual(decomp._allocation(theirs, ours), (True, None, 0))
+        ours[1] = (5, "mov eax, dword ptr [rcx + 0xc]")      # another field: a difference of its own
+        self.assertEqual(decomp._allocation(theirs, ours), (False, 3, 1))
+
+    def test_inlined_on_one_side_called_on_the_other(self):
+        import difflib
+        def ops(a, b):
+            return difflib.SequenceMatcher(None, [x[1] for x in a], [x[1] for x in b]).get_opcodes()
+        get = (0x5000, "Widget::Get")
+        theirs = [(0, "mov rcx, rbx", None), (3, "call <reloc>", get), (8, "test eax, eax", None)]
+        ours = [(0, "mov rcx, rbx", None), (3, "mov eax, dword ptr [rcx + 0x8]", None), (6, "test eax, eax", None)]
+        self.assertEqual(decomp._inlined(theirs, ours, ops(theirs, ours)), "inlined here, called there: Widget::Get")
+        # the other way round, when the PDB says what the shipped code has inline there
+        site = pdb.InlineSite("Widget::Get", None, None, 0, [(3, 6, None, None)])
+        self.assertEqual(decomp._inlined(ours, theirs, ops(ours, theirs), [site]),
+                         "called here, inlined there: Widget::Get")
+        self.assertIsNone(decomp._inlined(ours, theirs, ops(ours, theirs)))          # no evidence: nothing
+        cookie = [(0, "mov rcx, rbx", None), (3, "call <reloc>", (0x6000, "__security_check_cookie")),
+                  (8, "test eax, eax", None)]
+        self.assertIsNone(decomp._inlined(cookie, ours, ops(cookie, ours)))       # a helper is never inlined
+        # a call ours makes too is not inlined
+        moved = [(0, "call <reloc>", get), (5, "mov rcx, rbx", None), (8, "test eax, eax", None)]
+        self.assertIsNone(decomp._inlined(theirs, moved, ops(theirs, moved)))
 
     def test_not_an_object_file(self):
         bad = self.dir / "x.obj"
