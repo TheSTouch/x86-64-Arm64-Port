@@ -124,6 +124,32 @@ class DecompTest(unittest.TestCase):
         m.names[STRING_RVA] = "??_C@_1BM@JIAFBGPB@?$AAH?$AAe@"
         self.assertEqual(m.label(STRING_RVA), 'u"Hello, loading"')
 
+    def test_log_records_read_as_their_format_line_and_verbosity(self):
+        data = bytearray(self.dll.read_bytes())
+        base = 0x140000000
+        struct.pack_into("<QQii", data, 0x1400 + 0x1c0, base + STRING_RVA, base + 0x21e0, 859, 3)
+        data[0x1400 + 0x1e0:0x1400 + 0x1eb] = b"Screen.cpp\0"
+        self.dll.write_bytes(bytes(data))
+        m = decomp.Module(self.dll)
+        self.assertEqual(m.label(0x21c0), 'log Warning, line 859: u"Hello, loading"')
+        struct.pack_into("<i", data, 0x1400 + 0x1d4, 9)  # no such verbosity: not a record
+        self.dll.write_bytes(bytes(data))
+        self.assertIsNone(decomp.Module(self.dll).label(0x21c0))
+
+    def test_globals_named_by_the_dynamic_initializer_that_writes_them(self):
+        # `dynamic initializer for 'GScreenName'' at RVA 0x1080: sub rsp, 0x28; lea rdx, [string];
+        # lea rcx, [rip -> 0x2100]; call [rip -> IAT]
+        code = bytes.fromhex("4883ec28") + b"\x48\x8d\x15" + struct.pack("<i", STRING_RVA - 0x108b)
+        code += b"\x48\x8d\x0d" + struct.pack("<i", 0x2100 - 0x1092) + b"\xff\x15" + struct.pack("<i", 0x2040 - 0x1098)
+        data = bytearray(self.dll.read_bytes())
+        data[0x480:0x480 + len(code)] = code
+        self.dll.write_bytes(bytes(data))
+        m = decomp.Module(self.dll)
+        m.functions.append(pdb.Function("`dynamic initializer for 'GScreenName''", 1, 0x80, len(code), "a.obj"))
+        self.assertEqual(m.label(0x2100), "GScreenName")
+        self.assertEqual(m.label(0x2108), "GScreenName+0x8")       # FString's ArrayNum
+        self.assertIsNone(m.label(0x2110))                         # past an FString
+
     def test_game_functions_select_by_source_folder(self):
         m = decomp.Module(self.dll)
         self.assertEqual([f.name for f in m.game_functions("\\Game\\Source\\")], ["FGScreen::Construct"])

@@ -11,11 +11,13 @@ by its instructions that differ once both disassemblies are aligned. `families`
 groups functions whose code is the same once numbers are masked.
 """
 
+import bisect
 import difflib
 import os
 from collections import Counter
 import re
 import shutil
+import struct
 import subprocess
 import tempfile
 from dataclasses import dataclass, field
@@ -32,6 +34,9 @@ REGISTERS = {r: 328 + i for i, r in enumerate(("rax", "rbx", "rcx", "rdx", "rsi"
 ACCESS = {"byte": 1, "word": 2, "dword": 4, "fword": 6, "qword": 8, "tbyte": 10, "xmmword": 16, "ymmword": 32,
           "zmmword": 64}
 RCX = {"rcx", "ecx", "cx", "cl", "ch"}
+VERBOSITY = {1: "Fatal", 2: "Error", 3: "Warning", 4: "Display", 5: "Log", 6: "Verbose", 7: "VeryVerbose"}
+INITIALIZER = "`dynamic initializer for '"
+SCN_MEM_WRITE = 0x80000000
 
 
 def objdump():
@@ -55,7 +60,7 @@ class Module:
         self.functions = pdb.functions(self.pdb)
         self.names = {self.rva(s, o): n for (s, o), n in pdb.publics(self.pdb).items() if 0 < s <= len(self.image.sections)}
         self.names.update({self.rva(f.segment, f.offset): f.name for f in self.functions})
-        self._types = self._details = self._symbols = None
+        self._types = self._details = self._symbols = self._globals = None
         self.paired = {}  # a compiled object's decorated name -> the RVA of the shipped function match paired it with
 
     @property
@@ -122,12 +127,57 @@ class Module:
             return '"' + narrow.decode() + '"'
         return None
 
+    def record_at(self, rva):
+        """The FStaticBasicLogRecord at rva (Format, File, Line, Verbosity: what UE_LOG passes) as
+        `log Warning, line 859: u"..."`; None if what is there does not read as one."""
+        raw = self._bytes_at(rva, 24, data_only=True)
+        if len(raw) < 24:
+            return None
+        text, file, line, verbosity = struct.unpack("<QQii", raw)
+        base = self.image.image_base
+        if not 0 < line < 1 << 20 or verbosity & 0xF not in VERBOSITY or not all(
+                base < x < base + (1 << 31) for x in (text, file)):
+            return None
+        text, file = self.string_at(text - base), self.string_at(file - base)
+        if not text or not text.startswith('u"') or not file or file.startswith('u"'):
+            return None
+        return f"log {VERBOSITY[verbosity & 0xF]}, line {line}: {text}"
+
+    def global_at(self, rva):
+        """The global a dynamic initializer constructs at rva, by the initializer's name: the object its first
+        lea rcx, [rip + X] passes (an FString's constructor's this), in a writable section, not a public
+        symbol; within its first 16 bytes as NAME+0x8. None otherwise."""
+        if self._globals is None:
+            names = self._initialized()
+            self._globals = sorted(names), names
+        keys, names = self._globals
+        i = bisect.bisect_right(keys, rva) - 1
+        if i < 0 or rva - keys[i] >= 0x10:
+            return None
+        return names[keys[i]] + (f"+{rva - keys[i]:#x}" if rva != keys[i] else "")
+
+    def _initialized(self):
+        writable = [s for s in self.image.sections if s.characteristics & SCN_MEM_WRITE]
+        found = {}
+        for f in self.functions:
+            if not f.name.startswith(INITIALIZER) or not f.name.endswith("''"):
+                continue
+            start = self.rva(f.segment, f.offset)
+            code = self._bytes_at(start, min(f.length, 32))
+            at = code.find(b"\x48\x8d\x0d")
+            if at < 0 or at + 7 > len(code):
+                continue
+            target = start + at + 7 + struct.unpack_from("<i", code, at + 3)[0]
+            if target not in self.names and any(s.vaddr <= target < s.vaddr + s.vsize for s in writable):
+                found.setdefault(target, set()).add(f.name[len(INITIALIZER):-2])
+        return {rva: names.pop() for rva, names in found.items() if len(names) == 1}  # two claims: neither
+
     def label(self, rva):
         if rva in self.image.iat:
             return self.image.iat[rva]
         if rva in self.names and not self.names[rva].startswith("??_C@"):  # ??_C@: a string literal's symbol
             return self.names[rva]
-        return self.string_at(rva)
+        return self.string_at(rva) or self.record_at(rva) or self.global_at(rva)
 
     def disassemble(self, f, length=None):
         if not objdump():
