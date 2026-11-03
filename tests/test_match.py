@@ -307,6 +307,16 @@ class MatchTest(unittest.TestCase):
         self.assertEqual(decomp.pair_scoped(["??__EGScreens@@YAXXZ"], shipped), {})
         pairs = decomp.pair_scoped(["??__EGScreens@@YAXXZ"], shipped, "Module.Game.2.cpp.obj")
         self.assertEqual(pairs["??__EGScreens@@YAXXZ"].offset, 0x20)
+        # a namespace's global: the PDB puts the namespace outside, a class's static inside; the decorated name
+        # does not tell which, so the form the PDB has
+        shipped = [fn("OnlineMessages::`dynamic initializer for 'Kicked''", 0x10),
+                   fn("UE::Anim::`dynamic initializer for 'BoneNamespace''", 0x20),
+                   fn("UE::`dynamic atexit destructor for 'FDetails::TypeId''", 0x30),
+                   fn("`dynamic initializer for 'FBuffer::Null''", 0x40)]
+        names = ["??__EKicked@OnlineMessages@@YAXXZ", "??__EBoneNamespace@Anim@UE@@YAXXZ",
+                 "??__FTypeId@FDetails@UE@@YAXXZ", "??__ENull@FBuffer@@YAXXZ"]
+        self.assertEqual({n: f.offset for n, f in decomp.pair_scoped(names, shipped).items()},
+                         dict(zip(names, (0x10, 0x20, 0x30, 0x40))))
 
     def test_renamed_registers_and_stack_slots(self):
         theirs = [(0, "mov rax, qword ptr [rcx + 0x8]"), (4, "add eax, edx"), (6, "je +0000a"), (8, "nop"), (0xa, "ret")]

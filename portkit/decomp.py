@@ -761,6 +761,7 @@ def pair_scoped(names, functions, compiland=None):
             groups.setdefault(_unnumbered(name), [[], []])[1].append(fs[0])
     out = {}
     for n, k in scoped.items():
+        k = scoped[n] = next((x for x in _spellings(k) if len(by_name.get(x, ())) == 1), k)
         if len(by_name.get(k, ())) == 1:
             out[n] = by_name[k][0]
         groups.setdefault(_unnumbered(k), [[], []])[0].append(n)
@@ -772,6 +773,19 @@ def pair_scoped(names, functions, compiland=None):
         if all(out.get(n, f) is f for n, f in zip(ours, theirs)):
             out.update(zip(ours, theirs))
     return out
+
+
+def _spellings(name):
+    """The names the PDB may give an initializer or atexit destructor: the qualified name inside (a class's
+    static, "`dynamic initializer for 'FBuffer::Null''"), or a namespace outside, at each `::`
+    ("OnlineMessages::`dynamic initializer for 'Kicked''"); the decorated name does not tell a namespace
+    from a class. Any other name: itself."""
+    hit = re.fullmatch(r"`(dynamic (?:initializer|atexit destructor)) for '(.+)''", name)
+    if not hit:
+        return [name]
+    what, parts = hit.group(1), hit.group(2).split("::")
+    return [name] + [f"{'::'.join(parts[:i])}::`{what} for '{'::'.join(parts[i:])}''"
+                     for i in range(len(parts) - 1, 0, -1)]
 
 
 def _unnumbered(name):
