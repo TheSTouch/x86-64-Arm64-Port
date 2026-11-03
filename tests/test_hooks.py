@@ -169,3 +169,16 @@ class PublicSymbolsTest(unittest.TestCase):
             dll.write_bytes(build_dll())
             with self.assertRaises(Fail):
                 hooks.Shipped(dll)
+
+
+class RecompApiTest(unittest.TestCase):
+    def test_matching_build_exports_like_the_shipped_module(self):
+        # MSVC inlines an exported function less readily than a plain one: the matching build declares what the
+        # shipped module did. Project/stage.sh of the recovered-code repository greps this exact line.
+        header = (Path(__file__).parents[1] / "windows" / "recomp-hooks" / "RecompApi.h").read_text()
+        hooking, _, matching = header.partition("#if RECOMP_HOOKS\n")[2].partition("#else\n")
+        self.assertIn("#define FACTORYGAME_API __declspec( dllimport )\n", hooking)
+        self.assertEqual(matching.partition("#endif")[0].splitlines()[0],
+                         "#define FACTORYGAME_API __declspec( dllexport )")
+        self.assertNotIn("changes no code", header)
+
