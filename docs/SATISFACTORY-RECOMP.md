@@ -222,8 +222,11 @@ FactoryGame.dll (15 MB) cannot be swapped whole, so its functions are replaced o
 - **Compiling recovered FactoryGame code.** The build project holds FactoryGame as a headers-only module (`Headers.zip`,
   with Coffee Stain's UHT plugin and a declarations-only Wwise stub whose sizes come from the PDB), so UHT runs on its
   978 headers and nothing compiles FactoryGame itself. The recovered functions compile in a module of their own,
-  `FactoryGameRecomp`, with FactoryGame's definitions. In a matching build `FACTORYGAME_API` is empty, as inside
-  FactoryGame, and the objects match the shipped functions byte for byte (`./port decomp --match`).
+  `FactoryGameRecomp`, with FactoryGame's definitions. In a matching build `FACTORYGAME_API` is
+  `__declspec( dllexport )`, as inside FactoryGame, and the objects match the shipped functions byte for byte
+  (`./port decomp --match`). It is not neutral: MSVC inlines an exported function less readily than a plain one, and
+  with the macro empty seven functions differed that match with dllexport (batch Pace 4: `ShouldShowAlphaInfoScreen`,
+  `ToggleFullscreenMode`...).
 - **The hook DLL** ([windows/recomp-hooks](../windows/recomp-hooks)). The same sources built with `RECOMP_HOOKS=1`:
   `FACTORYGAME_API` becomes dllimport, so what the recovered code takes from FactoryGame and the game's plugins goes
   through `__imp_` pointers. `./port hooks` reads the compiled objects and the PDBs and writes the tables object the
@@ -391,6 +394,23 @@ other's inlining, so a half-done file keeps differing (`LoadSettings` matched on
 watcher; between runs a batch can be compiled and matched on the Mac (item 1), and the permuter takes what is left
 differing, unattended.
 
+### Done (2026-11-03, batch "Tools")
+
+What session C's recovery of blob 107 asked of the tools, by session A of batch "Tools" while session B kept
+recovering:
+
+| # | Command | Measured on blob 107 |
+|---|---|---|
+| A-1 | `RecompApi.h`: the matching build defines `FACTORYGAME_API` as dllexport (above); `Project/stage.sh` greps that exact line | |
+| A-2 | `--disasm` names a bitfield access by the bits it reaches, with each `LF_BITFIELD`'s position from the PDB: `test byte ptr [rbx + 0x2b], 0x20 ; ar->ArIsSaveGame` (test, or, xor: the mask's bits; and: the bits it clears; bt*: the bit numbered) | |
+| A-3 | `--match` pairs what is decorated inside a function's scope with the PDB's undecorated name, "by scope": lambdas (nested too), fgcheck's `Impl` and other local classes, dynamic initializers and atexit destructors, deleting destructors; by exact name, else in the object's own blob (a header's static has an initializer in every blob), else the Nth of its kind in its function when both sides have as many | 251 more functions paired, 247 of them matched; unpaired 1,622 -> 1,371 (left: templates instantiated on a lambda) |
+| A-4 | `--diff` ends with `verdict:` before `score`: `registers only`, `stack slots only` (renamed one to one), `register allocation only` (the same once copies, spills and nops are left out and registers masked), `inlined here, called there: X` / `called here, inlined there: Y` (calls compared by callee; the reverse needs the PDB's inline site), else `first difference at File.cpp:<line>[, in inlined Z]; N instructions differ besides register allocation`. Nothing when unsure | of 98 differing functions: 2 register allocation only, ~40 inline verdicts (`OnRep_CheatNoPower`: `CastChecked<IFGOptionInterface,UFGAdvancedGameSettings>`), the rest a line. `FindInactivePlayer` (7 other instructions) and `GetClosestUnOccupiedRespawnPoint` (5) are more than registers in this object |
+| A-5 | `--disasm` reads an `FStaticBasicLogRecord` operand: `log Warning, line 859: u"No story tutorial intro manager created when calling NotifyPlayerAdded"`; and names a global by the dynamic initializer that constructs it (`VIDEO_QUALITY_SECTION_NAME`, `+0x8` inside an FString) | 9,012 FactoryGame globals named, read on first need (2 s) |
+| A-6 | `./port decomp <dll> --callers NAME`: the functions that call (or tail-jump to) a function, or an imported one through the import address table, with "same blob" or the caller's blob; a site counts only where the caller's disassembly starts an instruction there | 2 s |
+| A-7 | `./port decomp <dll> --by-line NAME`: per line of the function's own source file (from the PDB), in address order, the calls, inlined calls, strings, log records, globals, fields and compared constants | |
+| A-8 | `./port permute` also swaps the operands of `==`, `!=`, `+`, `*`, `&`, `\|`, `^` (only a whole operand, so precedence holds), the arguments of `Dist`, `DistSquared`, `Dist2D`, `DotProduct`, `FMath::Min`/`Max`, and moves a local's declaration up or down one statement | ChoosePlayerStart's `Dist( a, b )` -> `Dist( b, a )` is now among its candidates |
+| A-9 | `./port msvc match` names the shipped instruction at each first difference from one objdump (it ran a full `--disasm` per differing function), and matching compiles (`msvc match`, the permuter) leave out `/Z7 /Zo`: the same code (5,742 of 5,742 functions), the back end 10-12 s -> 3.3 s; `--debug-info` keeps them | 81.6 s -> about 40 s quiet (match 37.7 s -> 4.9 s, compile 36-40 s -> 32-34 s), the output identical line for line. Not under 30 s: the compiler's front end alone takes 24-29 s |
+
 Still to do: 3 (a decompiler draft), 4 (skeletons from the PDB), 5 (systematic differences fixed once) and 13 (stubs
 that log, with the native milestones).
 
@@ -458,6 +478,7 @@ layers/imagelog/build.sh
 - Build the fork for macOS arm64, and check that VulkanRHI is available there.
 - The matching harness: `./port decomp <dll> --match <file.obj>` pairs each function of a compiled object
   with the shipped one of the same decorated name (the PDB's public symbols; a static function by its
-  qualified name when only one has it), masks the bytes relocations fill, and says matched or where the
+  qualified name when only one has it; lambdas, local classes and dynamic initializers by scope), masks the
+  bytes relocations fill, and says matched or where the
   first difference is, with a score. `./port msvc match` compiles a blob on the Mac first, with MSVC
   14.38.33130 under Wine and UBT's own flags ("Making recovery faster", item 1).
