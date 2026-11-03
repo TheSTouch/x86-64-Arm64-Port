@@ -447,11 +447,13 @@ def response_file(module, source_name):
 
 
 def command_for(project, module, source_name, out_dir, hooks=False, mapper=None, text=None, pch=None,
-                debug_info=True):
+                debug_info=True, include_first=None):
     """The Mac compile of one source: the PC's response file with its paths mapped, the definitions patched for
     this kind of build, the object written to out_dir. pch: the PCH built on the Mac (`build_pch`) for /Fp, or
     None to compile without one (its header is forced with /FI either way). debug_info False leaves out /Z7
-    and /Zo: the code is the same, the back end a third as long (matching reads no debug information)."""
+    and /Zo: the code is the same, the back end a third as long (matching reads no debug information).
+    include_first: a folder searched before every include folder, so a file there stands in for the staged one
+    of the same name (a permuter worker's candidate); the blob itself is unchanged."""
     m = mapper or PathMap(project)
     work = Path(out_dir)
     work.mkdir(parents=True, exist_ok=True)
@@ -477,6 +479,9 @@ def command_for(project, module, source_name, out_dir, hooks=False, mapper=None,
         elif v is not None:
             v = wine_path(m.mac(v))
         items.append([o, v])
+    if include_first is not None:
+        at = next((i for i, (o, _) in enumerate(items) if o is not None and o.lower() == "/i"), len(items))
+        items.insert(at, ["/I", wine_path(include_first)])
     return Command(items)
 
 
@@ -535,12 +540,13 @@ def build_pch(pc_pch, rebuild=False):
     return pch
 
 
-def compile_one(project, module, source_name, out_dir, hooks=False, pch=True, debug_info=False):
+def compile_one(project, module, source_name, out_dir, hooks=False, pch=True, debug_info=False, include_first=None):
     started = time.monotonic()
     local_pch = None
     if pch and (pc_pch := pch_of(module, source_name)):
         local_pch = build_pch(pc_pch)
-    cmd = command_for(project, module, source_name, out_dir, hooks, pch=local_pch, debug_info=debug_info)
+    cmd = command_for(project, module, source_name, out_dir, hooks, pch=local_pch, debug_info=debug_info,
+                      include_first=include_first)
     rsp = Path(out_dir) / f"{source_name}.rsp"
     rsp.write_text("\n".join(cmd.lines()) + "\n", encoding="utf-8")
     obj = Path(out_dir) / f"{source_name}.obj"

@@ -132,6 +132,12 @@ class ResponseFileTest(unittest.TestCase):
             without = msvc.command_for(tmp / "project", "M", "Module.FactoryGame.101.cpp", tmp / "out", mapper=m,
                                        text=self.RSP + "/Z7\r\n/Zo\r\n/Ox\r\n", debug_info=False).lines()
             self.assertEqual(sorted(set(with_debug) - set(without)), ["/Z7", "/Zo"])
+            # a permuter worker's folder searched before every other include folder
+            first = msvc.command_for(tmp / "project", "M", "Module.FactoryGame.101.cpp", tmp / "out", mapper=m,
+                                     text=self.RSP, include_first=tmp / "worker").lines()
+            includes = [x for x in first if x.startswith("/I ")]
+            self.assertEqual(includes[0], f'/I {msvc.quote(msvc.wine_path(tmp / "worker"))}')
+            self.assertEqual(includes[1:], [x for x in lines if x.startswith("/I ")])
 
 
 class PathMapTest(unittest.TestCase):

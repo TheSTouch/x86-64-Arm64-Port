@@ -415,7 +415,7 @@ def cmd_cdo(a):
 
 def cmd_permute(a):
     run, beside = permute.permute(a.project, a.file, a.function, tries=a.tries, minutes=a.minutes, seed=a.seed,
-                                  log=lambda m: print(m, flush=True))
+                                  log=lambda m: print(m, flush=True), jobs=a.jobs)
     best = run.best[0]
     print(f"{run.function}: score {run.start} -> {best.score} in {run.tries} candidates compiled ({run.failed} did not "
           f"compile)" + ("; no new rewrite left" if run.exhausted else "") + f"; best candidates in {beside}")
@@ -580,6 +580,8 @@ def parser():
     sp.add_argument("--tries", type=int, default=100, help="at most this many candidates (default: %(default)s)")
     sp.add_argument("--minutes", type=float, default=60, help="at most this long (default: %(default)s)")
     sp.add_argument("--seed", type=int, help="for a run that can be repeated")
+    sp.add_argument("--jobs", type=int, default=3, help="candidates compiled at once (default: %(default)s; 2 while "
+                    "another compile runs on this Mac)")
     sp.set_defaults(fn=cmd_permute)
     return p
 

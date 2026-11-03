@@ -1,7 +1,9 @@
 import random
 import tempfile
+import threading
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from portkit import config, permute
 from portkit.util import Fail
@@ -127,6 +129,43 @@ class RewriteTest(unittest.TestCase):
         rng = random.Random(5)
         for name in ("UFoo::GetBar", "UFoo::GetLimit", "UFoo::Tick"):
             self.assertNotEqual(permute.mutate(body_of(name), rng), body_of(name))
+
+
+class ParallelTest(unittest.TestCase):
+    def test_candidates_compile_side_by_side_from_their_own_copies(self):
+        # each worker compiles its candidate from a folder of its own searched first; the staged file is never
+        # rewritten, and every candidate is scored
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "Project"
+            path = project / "Source" / "FactoryGameRecomp-Recovered" / "FGFoo.cpp"
+            path.parent.mkdir(parents=True)
+            path.write_text(SOURCE)
+            seen, lock = [], threading.Lock()
+
+            def score_once(project_, blob, function, out_dir, shipped=None, include_first=None):
+                text = (include_first / "FGFoo.cpp").read_text() if include_first else path.read_text()
+                with lock:
+                    seen.append((include_first, text))
+                return (0 if include_first and text != SOURCE else 5), 1.0
+
+            saved = config.MSVC_BUILDS
+            config.MSVC_BUILDS = Path(tmp) / "builds"
+            try:
+                with mock.patch.object(permute, "score_once", side_effect=score_once), \
+                        mock.patch.object(permute.msvc, "blob_name", return_value="Module.FactoryGame.1.cpp"), \
+                        mock.patch.object(permute.msvc, "pch_of", return_value=None), \
+                        mock.patch.object(permute.decomp, "Module"):
+                    run, _ = permute.permute(project, "FGFoo.cpp", "UFoo::Tick", tries=3, seed=1, jobs=3,
+                                             log=lambda m: None)
+            finally:
+                config.MSVC_BUILDS = saved
+            self.assertEqual(path.read_text(), SOURCE)
+            self.assertEqual(run.tries, 3)
+            self.assertEqual(run.best[0].score, 0)
+            folders = {f for f, _ in seen if f}
+            self.assertEqual(len(folders), 3)                        # three workers, a folder each
+            self.assertTrue(all(Path(tmp) / "builds" in f.parents for f in folders))
+            self.assertEqual(seen[0], (None, SOURCE))                 # the start: the staged file as it is
 
 
 class GuardTest(unittest.TestCase):

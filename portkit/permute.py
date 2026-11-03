@@ -3,14 +3,17 @@ decompilations: small rewrites of the function's C++ text, each compiled on the 
 and scored against the shipped function (`decomp.match`'s score: instructions not the same once aligned,
 0 when matched). Improvements are kept and rewritten further; it stops at 0 or at a limit.
 
-It works on a staged copy of the project, never the recovered-code repository: the staged file is changed
-for each try and put back at the end; the best candidates are written beside it, for a person (or a
-session) to carry over by hand. The rewrites are textual, no C++ parser: a rewrite that does not compile
+It works on a staged copy of the project, never the recovered-code repository, and leaves the staged file
+as it is: `jobs` candidates compile at once, each from a worker folder of its own searched before the
+project's include folders, so the blob includes the worker's copy of the file. The best candidates are
+written beside the staged file, for a person (or a session) to carry over by hand. The rewrites are textual, no C++ parser: a rewrite that does not compile
 simply scores nothing.
 """
 
+import concurrent.futures
 import random
 import re
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -426,16 +429,20 @@ class Run:
     exhausted: bool = False
 
 
-def score_once(project, blob, function, out_dir, module="FactoryGameRecomp", shipped=None):
-    """(score, seconds) for the staged file as it is now; score None when it does not compile or the
-    function is not in the object. shipped: the shipped module already read (decomp.Module), else read here;
-    only `function` is compared."""
+_MATCH = threading.Lock()   # workers share the shipped module, whose match state is per call
+
+
+def score_once(project, blob, function, out_dir, module="FactoryGameRecomp", shipped=None, include_first=None):
+    """(score, seconds) for the staged file as it is now, or with the files in include_first standing in for
+    the staged ones; score None when it does not compile or the function is not in the object. shipped: the
+    shipped module already read (decomp.Module), else read here; only `function` is compared."""
     started = time.monotonic()
-    c = msvc.compile_one(project, module, blob, out_dir)
+    c = msvc.compile_one(project, module, blob, out_dir, include_first=include_first)
     if not c.ok:
         return None, time.monotonic() - started
-    for r in decomp.match(shipped or msvc.shipped_dll(module), c.obj, only=function):
-        return r.score, time.monotonic() - started
+    with _MATCH:
+        for r in decomp.match(shipped or msvc.shipped_dll(module), c.obj, only=function):
+            return r.score, time.monotonic() - started
     return None, time.monotonic() - started
 
 
@@ -446,7 +453,7 @@ def recovered_file(project, name):
     return path
 
 
-def permute(project, file_name, function, tries=100, minutes=60, seed=None, keep=5, log=print):
+def permute(project, file_name, function, tries=100, minutes=60, seed=None, keep=5, log=print, jobs=3):
     project = Path(project).resolve()
     if project.is_relative_to(config.RECOVERED_REPO.resolve()) or config.inside_repository(project):
         raise Fail(f"{project}: the permuter works on a staged copy, never in the recovered-code repository or here")
@@ -456,47 +463,55 @@ def permute(project, file_name, function, tries=100, minutes=60, seed=None, keep
     start, end = find_function(original, function)
     base = original[start:end]
     out_dir = config.MSVC_BUILDS / "permute" / project.name
+    workers = [out_dir / f"worker{k}" for k in range(max(1, jobs))]   # each: its objects, and src/ first
     rng = random.Random(seed)
     deadline = time.monotonic() + 60 * minutes
     beside = path.parent / f"{path.name}.permute"
     beside.mkdir(exist_ok=True)
-    try:
-        if msvc.pch_of("FactoryGameRecomp", blob):
-            msvc.build_pch(msvc.pch_of("FactoryGameRecomp", blob))
-        shipped = decomp.Module(msvc.shipped_dll("FactoryGameRecomp"))   # read once for every candidate
-        first, took = score_once(project, blob, function, out_dir, shipped=shipped)
-        if first is None:
-            raise Fail(f"{file_name} does not compile as staged, or {function} is not in {blob}'s object")
-        run = Run(function, first, [Candidate(first, base, took)])
-        log(f"start: score {first} ({took:.0f} s a try)")
-        seen, idle = {base}, 0
-        while run.best[0].score > 0 and run.tries < tries and time.monotonic() < deadline:
-            # rewrite one of the best so far, the best most often
-            parent = run.best[min(int(rng.expovariate(1.5)), len(run.best) - 1)]
-            body = mutate(parent.body, rng)
-            if body is None or body in seen:
-                idle += 1
-                if idle >= 500:   # the rewrites have nothing new to offer
-                    run.exhausted = True
-                    break
-                continue
-            seen.add(body)
-            idle = 0
-            path.write_text(original[:start] + body + original[end:], encoding="utf-8")
-            score, took = score_once(project, blob, function, out_dir, shipped=shipped)
-            run.tries += 1
-            if score is None:
-                run.failed += 1
-                continue
-            if score < run.best[-1].score or len(run.best) < keep:
-                if score < run.best[0].score:
-                    log(f"try {run.tries}: score {score}")
-                run.best.append(Candidate(score, body, took))
-                run.best.sort(key=lambda c: c.score)
-                del run.best[keep:]
-                _write(beside, function, original, start, end, run)
-    finally:
-        path.write_text(original, encoding="utf-8")
+    if msvc.pch_of("FactoryGameRecomp", blob):
+        msvc.build_pch(msvc.pch_of("FactoryGameRecomp", blob))
+    shipped = decomp.Module(msvc.shipped_dll("FactoryGameRecomp"))   # read once for every candidate
+    first, took = score_once(project, blob, function, out_dir, shipped=shipped)
+    if first is None:
+        raise Fail(f"{file_name} does not compile as staged, or {function} is not in {blob}'s object")
+    run = Run(function, first, [Candidate(first, base, took)])
+    log(f"start: score {first} ({took:.0f} s a try, {len(workers)} at once)")
+    seen, idle = {base}, 0
+
+    def attempt(worker, body):
+        src = worker / "src"
+        src.mkdir(parents=True, exist_ok=True)
+        (src / path.name).write_text(original[:start] + body + original[end:], encoding="utf-8")
+        return score_once(project, blob, function, worker, shipped=shipped, include_first=src)
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=len(workers)) as pool:
+        while run.best[0].score > 0 and run.tries < tries and time.monotonic() < deadline and not run.exhausted:
+            bodies = []
+            while len(bodies) < min(len(workers), tries - run.tries):
+                # rewrite one of the best so far, the best most often
+                parent = run.best[min(int(rng.expovariate(1.5)), len(run.best) - 1)]
+                body = mutate(parent.body, rng)
+                if body is None or body in seen:
+                    idle += 1
+                    if idle >= 500:   # the rewrites have nothing new to offer
+                        run.exhausted = True
+                        break
+                    continue
+                seen.add(body)
+                idle = 0
+                bodies.append(body)
+            for body, (score, took) in zip(bodies, pool.map(attempt, workers, bodies)):
+                run.tries += 1
+                if score is None:
+                    run.failed += 1
+                    continue
+                if score < run.best[-1].score or len(run.best) < keep:
+                    if score < run.best[0].score:
+                        log(f"try {run.tries}: score {score}")
+                    run.best.append(Candidate(score, body, took))
+                    run.best.sort(key=lambda c: c.score)
+                    del run.best[keep:]
+                    _write(beside, function, original, start, end, run)
     _write(beside, function, original, start, end, run)
     return run, beside
 
