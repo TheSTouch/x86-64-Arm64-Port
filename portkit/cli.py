@@ -225,12 +225,15 @@ def cmd_decomp(a):
               f"{sum(bool(r[3]) for r in rows)} in the same unity blob", file=sys.stderr)
         return 0
     if a.by_line:
-        f = m.function(a.by_line)
-        for line, items in decomp.by_line(m, f):
-            print(f"{decomp._base(f.source)}:{line}  " + " | ".join(items))
+        for i, name in enumerate(a.by_line):
+            f = m.function(name)
+            if len(a.by_line) > 1:
+                print(("\n" if i else "") + f"; {f.name}")
+            for line, items in decomp.by_line(m, f):
+                print(f"{decomp._base(f.source)}:{line}  " + " | ".join(items))
         return 0
     if a.disasm:
-        print(m.disassemble(m.function(a.disasm)), end="")
+        print("\n".join(m.disassemble(m.function(name)) for name in a.disasm), end="")
         return 0
     fns = m.functions if a.all else m.game_functions(a.source)
     for f in fns:
@@ -461,10 +464,12 @@ def parser():
     sp.add_argument("dll", help="a .dll or .exe with its .pdb next to it")
     sp.add_argument("--source", help="only functions whose source path contains this (default: the game's own)")
     sp.add_argument("--all", action="store_true", help="list every function, engine templates included")
-    sp.add_argument("--disasm", metavar="NAME", help="disassemble one function (name or decorated name)")
+    sp.add_argument("--disasm", metavar="NAME", action="append", help="disassemble one function (name or decorated "
+                    "name); repeatable, the module read once, a blank line between functions")
     sp.add_argument("--type", metavar="NAME", help="a class, struct or enum: layout, members, vtable slots")
-    sp.add_argument("--by-line", metavar="NAME", help="per line of the function's own source file, in address order: "
-                    "the calls, inlined calls, strings, log records, globals, fields and compared constants")
+    sp.add_argument("--by-line", metavar="NAME", action="append", help="per line of the function's own source file, "
+                    "in address order: the calls, inlined calls, strings, log records, globals, fields and compared "
+                    "constants; repeatable, each function under `; NAME`")
     sp.add_argument("--callers", metavar="NAME", help="the functions of the module that call this one (or jump to it), "
                     "and whether each was compiled in the same unity blob")
     sp.add_argument("--out", metavar="DIR", help="write functions.tsv and one .asm per function (outside this repository)")

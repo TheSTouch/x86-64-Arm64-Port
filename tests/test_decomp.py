@@ -1,11 +1,14 @@
+import io
 import re
 import shutil
 import struct
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
+from unittest import mock
 
-from portkit import decomp, pdb
+from portkit import cli, decomp, pdb
 from tests.test_pdb import build_pdb
 from tests.test_pe import build_pe
 
@@ -127,6 +130,22 @@ class DecompTest(unittest.TestCase):
         # a function whose `this` is the object itself: no line, members as they were
         self.dll.with_suffix(".pdb").write_bytes(build_pdb(fields=True))
         self.assertNotIn("; this is", decomp.Module(self.dll).disassemble(f, length=len(code)))
+
+    @unittest.skipUnless(shutil.which("objdump"), "needs objdump (Xcode command line tools)")
+    def test_several_functions_in_one_run(self):
+        # --disasm and --by-line repeat; the module is read once for all of them
+        out = io.StringIO()
+        with mock.patch.object(decomp, "Module", wraps=decomp.Module) as read, redirect_stdout(out):
+            cli.main(["decomp", str(self.dll), "--disasm", "FGScreen::Construct", "--disasm", "`anonymous'::Helper"])
+        self.assertEqual(read.call_count, 1)
+        text = out.getvalue()
+        self.assertTrue(text.startswith("; FGScreen::Construct\n"))
+        self.assertIn("\n\n; `anonymous'::Helper\n", text)   # a blank line between functions
+        out = io.StringIO()
+        with redirect_stdout(out):
+            cli.main(["decomp", str(self.dll), "--by-line", "FGScreen::Construct", "--by-line", "FGScreen::Construct"])
+        first, second = out.getvalue().split("\n\n")
+        self.assertTrue(first.startswith("; FGScreen::Construct\n") and second.startswith("; FGScreen::Construct\n"))
 
     def test_the_bits_an_instruction_reaches(self):
         self.assertEqual(decomp._mask("test", "byte ptr [rbx + 0x2b], 0x20", 1), 0x20)
