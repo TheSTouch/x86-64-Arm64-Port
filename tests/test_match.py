@@ -21,16 +21,20 @@ def shipped_body():
 
 
 def build_obj(functions, bigobj=False):
-    """A COFF object, one COMDAT .text$mn section per function. functions: [(name, code, [(offset, type)])];
-    relocations point at an external symbol. A long name goes to the string table."""
+    """A COFF object, one COMDAT .text$mn section per function. functions: [(name, code, [(offset, type)
+    or (offset, type, symbol)])]; relocations point at an external symbol, __imp_X unless they name one. A long
+    name goes to the string table."""
     nsec = len(functions)
     header_size = 56 if bigobj else 20
     sym_size = 20 if bigobj else 18
     sections, raw, relocs = b"", b"", b""
     data_at = header_size + 40 * nsec
+    externals = list(dict.fromkeys(r[2] for _, _, rels in functions for r in rels if len(r) > 2))
+    index = {name: 1 + 4 * nsec + i for i, name in enumerate(externals)}   # after __imp_X and the functions'
     blobs = []
     for name, code, rels in functions:
-        blobs.append((code, b"".join(struct.pack("<IIH", off, 0, kind) for off, kind in rels)))
+        blobs.append((code, b"".join(struct.pack("<IIH", r[0], index.get(r[2], 0) if len(r) > 2 else 0, r[1])
+                                     for r in rels)))
     offset = data_at
     for code, rel in blobs:
         sections += struct.pack("<8sIIIIIIHHI", b".text$mn", 0, 0, len(code), offset, offset + len(code), 0,
@@ -58,6 +62,7 @@ def build_obj(functions, bigobj=False):
         symbols.append(struct.pack("<IHHIHB", len(code), len(rels), 0, 0, 0, 2).ljust(sym_size, b"\0"))
         symbols.append(symbol("$LN3", 0, i, 0x20, 6))                # a label: not a function
         symbols.append(symbol(name, 0, i, 0x20, 2))
+    symbols += [symbol(name, 0, 0, 0x20, 2) for name in externals]
     table = data_at + len(raw)
     if bigobj:
         head = struct.pack("<HHHHI16sIIIIIII", 0, 0xFFFF, 2, 0x8664, 0, BIGOBJ_CLASS, 0, 0, 0, 0,
@@ -145,13 +150,31 @@ class MatchTest(unittest.TestCase):
         marks = [row[0] for row in r.rows]
         self.assertEqual(marks[:4], ["=", ">", "=", "="])
         self.assertEqual(marks.count("="), len(marks) - 1)
-        self.assertEqual(r.rows[0][1:], ((0, "call qword ptr [rip + <reloc>]"), (0, "call qword ptr [rip + <reloc>]")))
+        self.assertEqual(r.rows[0][1:], ((0, "call qword ptr [rip + <reloc>]  ; ExitProcess"),
+                                         (0, "call qword ptr [rip + <reloc>]  ; X")))   # __imp_X, the object's
         self.assertEqual(r.rows[1][1:], (None, (6, "nop")))
         self.assertEqual(r.rows[2][1:], ((6, "lea rcx, [rip + <reloc>]"), (7, "lea rcx, [rip + <reloc>]")))
         listing = decomp.diff_listing(r)
         self.assertIn("> " + " " * 60 + "+00006  nop", listing)
         self.assertTrue(listing.rstrip().endswith("score 1"))
         self.assertTrue(decomp.match_line(r).endswith(" score 1"))
+
+    @unittest.skipUnless(shutil.which("objdump"), "needs objdump (Xcode command line tools)")
+    def test_relocated_calls_name_their_callee_on_both_sides(self):
+        # one extra call after ExitProcess's: the listing names it, the shipped side from the import table,
+        # ours from the relocation's symbol; the comparison does not see the names
+        code = shipped_body()
+        code = code[:6] + b"\xe8\0\0\0\0" + code[6:]
+        obj = self.dir / "Screen.cpp.obj"
+        obj.write_bytes(build_obj([(CONSTRUCT, code, [(2, 4, "__imp_ExitProcess"), (7, 4, "?Extra@FGScreen@@QEAAXXZ"),
+                                                       (14, 4)])]))
+        (r,) = decomp.match(self.dll, obj, diff=[CONSTRUCT])
+        self.assertEqual((r.state, r.score), ("differs", 1))
+        self.assertEqual(r.rows[0][1:], ((0, "call qword ptr [rip + <reloc>]  ; ExitProcess"),
+                                         (0, "call qword ptr [rip + <reloc>]  ; ExitProcess")))
+        self.assertEqual(r.rows[1], (">", None, (6, "call <reloc>  ; FGScreen::Extra")))
+        self.assertEqual(r.rows[2][1:], ((6, "lea rcx, [rip + <reloc>]"), (11, "lea rcx, [rip + <reloc>]")))
+        self.assertIn("> " + " " * 60 + "+00006  call <reloc>  ; FGScreen::Extra", decomp.diff_listing(r))
 
     @unittest.skipUnless(shutil.which("objdump"), "needs objdump (Xcode command line tools)")
     def test_matched_scores_zero_with_its_listing_too(self):

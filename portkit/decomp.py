@@ -638,7 +638,8 @@ def match_line(r):
 
 def diff_listing(r):
     """The shipped and compiled disassembly side by side: `=` the same, `!` changed, `<` shipped only, `>` ours
-    only; relocated operands as <reloc>. Ends with `verdict: ...` when the alignment tells what the differences
+    only; relocated operands as <reloc>, a call or tail call followed by the name of what it reaches
+    (`; Name`). Ends with `verdict: ...` when the alignment tells what the differences
     amount to (_verdict), then `score <n>`."""
     out = [f"; {r.name}  [{r.shipped}]: {r.state}" + (f", {r.detail}" if r.detail else "")]
     for mark, left, right in r.rows:
@@ -817,6 +818,9 @@ def _align(m, pairs):
     for i, (r, fn, f) in enumerate(pairs):
         ours = [(o, *_normalize(t, o, n, len(fn.code), fn.masked)) for o, n, t in listings[2 * i + 1]]
         theirs = [(o, *_normalize(t, o, n, len(blobs[2 * i]), None)) for o, n, t in listings[2 * i]]
+        calls = ([(o, x[1], _shipped_call(m, f, t, o, n, len(blobs[2 * i]))) for (o, n, t), x
+                  in zip(listings[2 * i], theirs)],
+                 [(o, x[1], _our_call(m, fn, t, o, n)) for (o, n, t), x in zip(listings[2 * i + 1], ours)])
         rows = []
         sm = difflib.SequenceMatcher(None, [k for *_, k in theirs], [k for *_, k in ours], autojunk=False)
         for tag, i1, i2, j1, j2 in sm.get_opcodes():
@@ -827,16 +831,23 @@ def _align(m, pairs):
             n = min(len(left), len(right))
             rows += [("!", a, b) for a, b in zip(left[:n], right[:n])]
             rows += [("<", a, None) for a in left[n:]] + [(">", None, b) for b in right[n:]]
-        r.rows, r.score = rows, sum(mark != "=" for mark, *_ in rows)
+        r.rows, r.score = _callees(rows, calls), sum(mark != "=" for mark, *_ in rows)
         if r.state == "matched":
             r.score = 0  # the bytes decide: a listing may show an operand only one side relocates
         elif not r.score:
             r.score = 1  # bytes differ where the text does not (another encoding of the same instruction)
         if r.state == "differs":
-            calls = ([(o, x[1], _shipped_call(m, f, t, o, n, len(blobs[2 * i]))) for (o, n, t), x
-                      in zip(listings[2 * i], theirs)],
-                     [(o, x[1], _our_call(m, fn, t, o, n)) for (o, n, t), x in zip(listings[2 * i + 1], ours)])
             r.verdict = _verdict(m, f, calls, rows)
+
+
+def _callees(rows, calls):
+    """The rows with the name of what each relocated call or tail call reaches after it, on both sides
+    (`call <reloc>  ; FSoftObjectPath::ResolveObject`): shown only, the alignment is already made."""
+    names = [{o: c[1] for o, _, c in side if c and c[1]} for side in calls]
+
+    def named(x, k):
+        return x and (x[0], f"{x[1]}  ; {names[k][x[0]]}" if x[0] in names[k] else x[1])
+    return [(mark, named(left, 0), named(right, 1)) for mark, left, right in rows]
 
 
 def _verdict(m, f, calls, rows):
