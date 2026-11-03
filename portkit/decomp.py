@@ -356,6 +356,53 @@ def _base(path):
     return path.replace("\\", "/").rsplit("/", 1)[-1]
 
 
+def callers(m, name):
+    """The functions of the module that call `name` (its name or decorated name; every function folded at its
+    address counts; or an imported function, by its decorated or undecorated name) or jump to it (a tail
+    call): [(caller, "call" or "jmp", RVA of the instruction, whether the caller was compiled in the same
+    unity blob; None for an import)], by address. A rel32 call or jump (through the import address table for
+    an import) found in .text counts only where the caller's disassembly has an instruction starting there
+    (needs objdump)."""
+    targets = {m.rva(f.segment, f.offset): f for f in m.functions if f.name == name or f.mangled == name}
+    slots = {rva for rva, n in m.image.iat.items() if name in (n.rpartition("!")[2], _short(n))}
+    if not targets and not slots:
+        raise Fail(f"no function {name!r} in {m.pdb.name}, nor imported")
+    blobs = {_base(f.compiland) for f in targets.values()}
+    starts = sorted({m.rva(f.segment, f.offset): f for f in reversed(m.functions)}.items())
+    keys = [rva for rva, _ in starts]
+    sites = {}
+    for s in m.image.sections:
+        if not s.executable:
+            continue
+        code = m._bytes_at(s.vaddr, s.raw_size)
+        pattern = b"[\xe8\xe9]" if targets else b"\xff[\x15\x25]"
+        for hit in re.finditer(pattern, code, re.DOTALL):
+            at = hit.start()
+            n = len(hit.group(0))
+            if at + n + 4 > len(code):
+                break
+            rva = s.vaddr + at
+            if rva + n + 4 + struct.unpack_from("<i", code, at + n)[0] not in (targets or slots):
+                continue
+            if code[at - 1:at] == b"\x48" and n == 2:
+                rva, at = rva - 1, at - 1  # rex.w jmp [rip + X]: the instruction starts at the prefix
+            i = bisect.bisect_right(keys, rva) - 1
+            if i >= 0 and rva < keys[i] + starts[i][1].length and keys[i] not in targets:
+                sites.setdefault(keys[i], []).append(rva)
+    if not sites or not objdump():
+        return []
+    owners = sorted(sites)
+    listings = _disassemble([m._bytes_at(rva, starts[keys.index(rva)][1].length) for rva in owners])
+    out = []
+    for rva, listing in zip(owners, listings):
+        f = starts[keys.index(rva)][1]
+        at = {o: text.split()[0] for o, _, text in listing}
+        for site in sites[rva]:
+            if at.get(site - rva) in ("call", "jmp"):
+                out.append((f, at[site - rva], site, _base(f.compiland) in blobs if targets else None))
+    return out
+
+
 def _is_game_source(path):
     p = path.replace("/", "\\").lower()
     return "\\source\\" in p and not any(x in p for x in ("\\engine\\", "\\intermediate\\", "\\thirdparty\\"))

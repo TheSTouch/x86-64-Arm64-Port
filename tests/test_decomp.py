@@ -150,6 +150,23 @@ class DecompTest(unittest.TestCase):
         self.assertEqual(m.label(0x2108), "GScreenName+0x8")       # FString's ArrayNum
         self.assertIsNone(m.label(0x2110))                         # past an FString
 
+    @unittest.skipUnless(shutil.which("objdump"), "needs objdump (Xcode command line tools)")
+    def test_callers_from_the_module_itself(self):
+        data = bytearray(self.dll.read_bytes())
+        # `anonymous'::Helper (RVA 0x1060) calls FGScreen::Construct (0x1010)
+        data[0x460:0x465] = b"\xe8" + struct.pack("<i", 0x1010 - 0x1065)
+        # inside Construct, a mov rax, imm64 whose bytes read as a call to Helper: not an instruction there
+        data[0x430:0x43a] = b"\x48\xb8\xe8" + struct.pack("<i", 0x1060 - 0x1037) + b"\0\0\0"
+        self.dll.write_bytes(bytes(data))
+        m = decomp.Module(self.dll)
+        rows = decomp.callers(m, "FGScreen::Construct")
+        self.assertEqual([(f.name, kind, site, same) for f, kind, site, same in rows],
+                         [("`anonymous'::Helper", "call", 0x1060, True)])
+        self.assertEqual(decomp.callers(m, "`anonymous'::Helper"), [])
+        # an import: Construct calls ExitProcess through the import address table
+        self.assertEqual([(f.name, kind, site, same) for f, kind, site, same in decomp.callers(m, "ExitProcess")],
+                         [("FGScreen::Construct", "call", 0x1010, None)])
+
     def test_game_functions_select_by_source_folder(self):
         m = decomp.Module(self.dll)
         self.assertEqual([f.name for f in m.game_functions("\\Game\\Source\\")], ["FGScreen::Construct"])

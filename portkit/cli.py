@@ -216,6 +216,14 @@ def cmd_decomp(a):
         print(pdb.Types(decomp.Module.pdb_of(a.dll)).describe(a.type), end="")
         return 0
     m = decomp.Module(a.dll)
+    if a.callers:
+        rows = decomp.callers(m, a.callers)
+        for f, kind, site, same in rows:
+            blob = "same blob" if same else decomp._base(f.compiland).removesuffix(".cpp.obj")
+            print(f"{kind:<4} {site:#010x}  {blob:<22}  {f.name}")
+        print(f"{len(rows)} call sites in {len({r[0].name for r in rows})} functions, "
+              f"{sum(bool(r[3]) for r in rows)} in the same unity blob", file=sys.stderr)
+        return 0
     if a.disasm:
         print(m.disassemble(m.function(a.disasm)), end="")
         return 0
@@ -449,6 +457,8 @@ def parser():
     sp.add_argument("--all", action="store_true", help="list every function, engine templates included")
     sp.add_argument("--disasm", metavar="NAME", help="disassemble one function (name or decorated name)")
     sp.add_argument("--type", metavar="NAME", help="a class, struct or enum: layout, members, vtable slots")
+    sp.add_argument("--callers", metavar="NAME", help="the functions of the module that call this one (or jump to it), "
+                    "and whether each was compiled in the same unity blob")
     sp.add_argument("--out", metavar="DIR", help="write functions.tsv and one .asm per function (outside this repository)")
     sp.add_argument("--match", metavar="OBJ", help="compare each function of a compiled .obj with the shipped one "
                     "(relocated operands masked): matched, or the first difference; each line ends with a score, "
