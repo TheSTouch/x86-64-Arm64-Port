@@ -230,6 +230,17 @@ class MatchTest(unittest.TestCase):
         self.assertEqual(decomp._normalize("je\t0x4 <f0+0x4>", 0, 2, 5, None)[0], "je +00004")
         self.assertEqual(decomp._normalize("call\t0x7f00", 0, 5, 5, None)[0], "call <reloc>")
 
+    def test_only_one_function_and_a_module_loaded_once(self):
+        # the permuter scores one function per candidate: only that one compared, the module read once
+        obj = self.dir / "Screen.cpp.obj"
+        obj.write_bytes(build_obj([(CONSTRUCT, shipped_body(), [(2, 4), (9, 4)]), ("?Unknown@@YAXXZ", b"\xc3", [])]))
+        m = decomp.Module(self.dll)
+        for only in (CONSTRUCT, "FGScreen::Construct"):   # its decorated or its shipped name
+            (r,) = decomp.match(m, obj, only=only)
+            self.assertEqual((r.name, r.state), (CONSTRUCT, "matched"))
+        self.assertEqual(len(decomp.match(m, obj)), 2)
+        self.assertEqual(decomp.match(m, obj, only="?Nothing@@YAXXZ"), [])
+
     def test_a_function_the_module_does_not_have_is_missing(self):
         r = self.match([("?Unknown@@YAXXZ", b"\xc3", [])])["?Unknown@@YAXXZ"]
         self.assertEqual(r.state, "missing")

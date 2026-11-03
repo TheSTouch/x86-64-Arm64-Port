@@ -426,16 +426,16 @@ class Run:
     exhausted: bool = False
 
 
-def score_once(project, blob, function, out_dir, module="FactoryGameRecomp"):
+def score_once(project, blob, function, out_dir, module="FactoryGameRecomp", shipped=None):
     """(score, seconds) for the staged file as it is now; score None when it does not compile or the
-    function is not in the object."""
+    function is not in the object. shipped: the shipped module already read (decomp.Module), else read here;
+    only `function` is compared."""
     started = time.monotonic()
     c = msvc.compile_one(project, module, blob, out_dir)
     if not c.ok:
         return None, time.monotonic() - started
-    for r in decomp.match(msvc.shipped_dll(module), c.obj):
-        if function in (r.name, r.shipped):
-            return r.score, time.monotonic() - started
+    for r in decomp.match(shipped or msvc.shipped_dll(module), c.obj, only=function):
+        return r.score, time.monotonic() - started
     return None, time.monotonic() - started
 
 
@@ -463,7 +463,8 @@ def permute(project, file_name, function, tries=100, minutes=60, seed=None, keep
     try:
         if msvc.pch_of("FactoryGameRecomp", blob):
             msvc.build_pch(msvc.pch_of("FactoryGameRecomp", blob))
-        first, took = score_once(project, blob, function, out_dir)
+        shipped = decomp.Module(msvc.shipped_dll("FactoryGameRecomp"))   # read once for every candidate
+        first, took = score_once(project, blob, function, out_dir, shipped=shipped)
         if first is None:
             raise Fail(f"{file_name} does not compile as staged, or {function} is not in {blob}'s object")
         run = Run(function, first, [Candidate(first, base, took)])
@@ -482,7 +483,7 @@ def permute(project, file_name, function, tries=100, minutes=60, seed=None, keep
             seen.add(body)
             idle = 0
             path.write_text(original[:start] + body + original[end:], encoding="utf-8")
-            score, took = score_once(project, blob, function, out_dir)
+            score, took = score_once(project, blob, function, out_dir, shipped=shipped)
             run.tries += 1
             if score is None:
                 run.failed += 1

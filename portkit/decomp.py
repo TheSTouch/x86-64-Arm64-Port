@@ -777,18 +777,21 @@ def _scopes(name):
     return [int(x) for x in re.findall(r"`(\d+)'", name)]
 
 
-def match(dll, obj, diff=()):
+def match(dll, obj, diff=(), only=None):
     """Each function of a compiled COFF object against the shipped function of the same decorated name
     (a public symbol), or else of the same qualified name when only one function has it, or else paired by
     scope (pair_scoped: lambdas, local classes, dynamic initializers). Bytes a relocation fills are masked
     on both sides: the shipped code has the linker's values there. Differing functions, and those named in
     `diff` (decorated or shipped name), are aligned instruction by instruction (needs objdump): rows and
-    score."""
+    score. dll: a path, or a Module already read (the permuter's, once per run). only: the one function
+    (decorated or shipped name) to compare and return; every function is still paired, for the names of
+    what it calls."""
     try:
         o = coff.parse(Path(obj).read_bytes())
     except coff.NotCOFF as e:
         raise Fail(f"{obj}: {e}")
-    m = Module(dll)
+    m = dll if isinstance(dll, Module) else Module(dll)
+    m.paired = {}
     by_mangled = {f.mangled: f for f in m.functions if f.mangled}
     by_name = {}
     for f in m.functions:
@@ -804,12 +807,15 @@ def match(dll, obj, diff=()):
                 shipped, how = candidates[0], "by name"
         if shipped is None and fn.name in scoped:
             shipped, how = scoped[fn.name], "by scope"
+        if shipped is not None:
+            m.paired[fn.name] = m.rva(shipped.segment, shipped.offset)
+        if only is not None and only not in (fn.name, shipped and shipped.name):
+            continue
         if shipped is None:
             results.append(Match(fn.name, "missing", detail="no function of that name in the shipped module"))
             continue
         results.append(_compare(m, fn, shipped, how))
         pairs.append((len(results) - 1, fn, shipped, how))
-        m.paired[fn.name] = m.rva(shipped.segment, shipped.offset)
     differing = [x for x in pairs if results[x[0]].state == "differs"]
     for (i, fn, f, how), insn in zip(differing, _instructions_at(m, [(f, results[i].offset) for i, _, f, _ in differing])):
         results[i] = _compare(m, fn, f, how, insn)  # the shipped instruction where they first differ, named
