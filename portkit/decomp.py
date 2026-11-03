@@ -36,6 +36,7 @@ ACCESS = {"byte": 1, "word": 2, "dword": 4, "fword": 6, "qword": 8, "tbyte": 10,
 RCX = {"rcx", "ecx", "cx", "cl", "ch"}
 VERBOSITY = {1: "Fatal", 2: "Error", 3: "Warning", 4: "Display", 5: "Log", 6: "Verbose", 7: "VeryVerbose"}
 INITIALIZER = "`dynamic initializer for '"
+FOLDED_SHOWN = 6  # the functions folded at a call's target listed after its name
 SCN_MEM_WRITE = 0x80000000
 
 
@@ -60,7 +61,7 @@ class Module:
         self.functions = pdb.functions(self.pdb)
         self.names = {self.rva(s, o): n for (s, o), n in pdb.publics(self.pdb).items() if 0 < s <= len(self.image.sections)}
         self.names.update({self.rva(f.segment, f.offset): f.name for f in self.functions})
-        self._types = self._details = self._symbols = self._globals = None
+        self._types = self._details = self._symbols = self._globals = self._folded = None
         self.paired = {}  # a compiled object's decorated name -> the RVA of the shipped function match paired it with
 
     @property
@@ -172,9 +173,26 @@ class Module:
                 found.setdefault(target, set()).add(f.name[len(INITIALIZER):-2])
         return {rva: names.pop() for rva, names in found.items() if len(names) == 1}  # two claims: neither
 
+    def folded(self, rva, near=None):
+        """The names of the functions the linker folded at rva (identical code kept once); [] where only one
+        function is. Game functions first, then in the PDB's order; with `near` (the calling function), the
+        closest to it first: the most words of its name shared, then its class, source file, unity blob."""
+        if self._folded is None:
+            at = {}
+            for f in self.functions:
+                at.setdefault(self.rva(f.segment, f.offset), {}).setdefault(f.name, f)
+            self._folded = {where: sorted(fs.values(), key=lambda f: not (f.source and _is_game_source(f.source)))
+                            for where, fs in at.items() if len(fs) > 1}
+        fs = self._folded.get(rva, [])
+        if near is not None:
+            fs = sorted(fs, key=lambda g: _closeness(near, g), reverse=True)
+        return [f.name for f in fs]
+
     def label(self, rva):
         if rva in self.image.iat:
             return self.image.iat[rva]
+        if folded := self.folded(rva):
+            return folded[0]
         if rva in self.names and not self.names[rva].startswith("??_C@"):  # ??_C@: a string literal's symbol
             return self.names[rva]
         return self.string_at(rva) or self.record_at(rva) or self.global_at(rva)
@@ -214,9 +232,13 @@ class Module:
                 rva = int(a, 16) - base
                 if not 0 < rva < 1 << 31 or start <= int(a, 16) < end:
                     continue
-                note = self.label(rva) or (f"[{rva:#x}]" if "rip" in insn else None)
+                folded = self.folded(rva, near=f)
+                note = (folded[0] if folded else self.label(rva)) or (f"[{rva:#x}]" if "rip" in insn else None)
                 if note and note not in notes:
                     notes.append(note)
+                    if others := folded[1:]:
+                        notes.append(f"folded with {len(others)}: " + ", ".join(others[:FOLDED_SHOWN])
+                                     + (", ..." if len(others) > FOLDED_SHOWN else ""))
             rows.append((addr - start, insn, notes))
         detail = self.details.detail(f) if f.module != 0xFFFF else None
         source, fields = _Source(detail), _Fields(self.types, detail, f, rows)
@@ -226,6 +248,17 @@ class Module:
             lines += source.at(offset)
             lines.append(f"  +{offset:05x}  {insn:<56}" + (f" ; {'; '.join(notes)}" if notes else ""))
         return "\n".join(lines) + "\n"
+
+
+def _closeness(f, g):
+    """How close function g is to function f, for ranking g among functions folded at what f calls: the words
+    of their unqualified names shared (GetLocalNetworkVersion, GetPlatformNetworkVersion: 3), then the same
+    class, the same source file, the same unity blob, a game function."""
+    def words(name):
+        return set(re.findall(r"[A-Z][a-z]+|[a-z]+|[A-Z]+(?![a-z])|\d+", name.rpartition("::")[2]))
+    return (len(words(f.name) & words(g.name)), f.name.rpartition("::")[0] == g.name.rpartition("::")[0],
+            bool(f.source) and f.source == g.source, f.compiland == g.compiland,
+            bool(g.source) and _is_game_source(g.source))
 
 
 class _Fields:

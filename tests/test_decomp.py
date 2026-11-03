@@ -147,6 +147,34 @@ class DecompTest(unittest.TestCase):
         first, second = out.getvalue().split("\n\n")
         self.assertTrue(first.startswith("; FGScreen::Construct\n") and second.startswith("; FGScreen::Construct\n"))
 
+    @unittest.skipUnless(shutil.which("objdump"), "needs objdump (Xcode command line tools)")
+    def test_a_call_to_folded_functions_names_them_game_functions_first(self):
+        # FGScreen::Construct and FGScreen::Folded share 0x1010, with a CRT stub the linker folded there too:
+        # the call reads as a game function, the others listed after it
+        data = bytearray(self.dll.read_bytes())
+        data[0x460:0x465] = b"\xe8" + struct.pack("<i", 0x1010 - 0x1065)   # Helper (0x1060): call 0x1010
+        self.dll.write_bytes(bytes(data))
+        self.dll.with_suffix(".pdb").write_bytes(build_pdb(folded=True))
+        m = decomp.Module(self.dll)
+        m.functions.insert(0, pdb.Function("__scrt_stub_for_acrt_uninitialize", 1, 0x10, 0x40, "msvcrt.lib"))
+        self.assertEqual(m.folded(0x1010), ["FGScreen::Construct", "FGScreen::Folded", "__scrt_stub_for_acrt_uninitialize"])
+        self.assertEqual(m.label(0x1010), "FGScreen::Construct")
+        self.assertEqual(m.folded(0x1060), [])
+        call = next(line for line in m.disassemble(m.function("`anonymous'::Helper"), length=5).splitlines()
+                    if line.startswith("  +00000"))
+        self.assertTrue(call.endswith("; FGScreen::Construct; folded with 2: FGScreen::Folded, "
+                                      "__scrt_stub_for_acrt_uninitialize"), call)
+        # ranked against the caller: the words of its name shared first, then its class
+        caller = pdb.Function("UFGInstance::GetLocalNetworkVersion", 1, 0x60, 8, "Module.Game.7.cpp.obj")
+        others = [pdb.Function(n, 1, 0x200, 8, "Module.Game.9.cpp.obj", source="D:\\Game\\Source\\G\\Private\\X.cpp")
+                  for n in ("UFGAction::IsNameStableForNetworking", "UFGPlatform::GetPlatformNetworkVersion",
+                            "UFGInstance::IsReady")]
+        m.functions += others
+        m._folded = None
+        self.assertEqual(m.folded(0x1200, near=caller), ["UFGPlatform::GetPlatformNetworkVersion",
+                                                         "UFGInstance::IsReady", "UFGAction::IsNameStableForNetworking"])
+        self.assertEqual(m.folded(0x1200)[0], "UFGAction::IsNameStableForNetworking")   # no caller: the PDB's order
+
     def test_the_bits_an_instruction_reaches(self):
         self.assertEqual(decomp._mask("test", "byte ptr [rbx + 0x2b], 0x20", 1), 0x20)
         self.assertEqual(decomp._mask("or", "byte ptr [rbx + 0x2b], 0x3", 1), 0x3)
