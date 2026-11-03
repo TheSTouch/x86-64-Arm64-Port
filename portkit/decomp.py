@@ -1143,7 +1143,7 @@ def _normalize(text, offset, length, size, masked):
     and compares by its displacement, so code that moved as a whole still aligns; instructions also compare
     by their length."""
     text = " ".join(re.sub(r"\s*<[^>]*>", "", text).partition(" # ")[0].split())
-    relocated = masked is not None and any(offset <= o < offset + length for o in masked)
+    relocated = masked is not None and any(o in masked for o in range(offset, offset + length))
     shown = key = text
     if hit := BRANCH.match(text):
         target = int(hit.group(2), 16)
