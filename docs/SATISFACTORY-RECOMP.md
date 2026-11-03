@@ -231,6 +231,8 @@ FactoryGame.dll (15 MB) cannot be swapped whole, so its functions are replaced o
   `FACTORYGAME_API` becomes dllimport, so what the recovered code takes from FactoryGame and the game's plugins goes
   through `__imp_` pointers. `./port hooks` reads the compiled objects and the PDBs and writes the tables object the
   DLL links: one slot per such symbol (module and RVA), one hook per recovered function (RVA, length, first bytes).
+  The RVAs come from the PDB's public symbols, so a function FactoryGame does not export gets its slot too; a name
+  no PDB has is left to the linker, which fails naming it.
   Engine modules link through their import libraries; those not yet loaded when the hook DLL loads are delay-loaded.
 - **Loading.** `FactoryPreEarlyLoadingScreen`, the first game module to load, loads the hook DLL (`RecompHooksClient.h`,
   one macro on a line that had only a brace, so its matches stay). The DLL registers for DLL load notifications; as
@@ -410,6 +412,17 @@ recovering:
 | A-7 | `./port decomp <dll> --by-line NAME`: per line of the function's own source file (from the PDB), in address order, the calls, inlined calls, strings, log records, globals, fields and compared constants | |
 | A-8 | `./port permute` also swaps the operands of `==`, `!=`, `+`, `*`, `&`, `\|`, `^` (only a whole operand, so precedence holds), the arguments of `Dist`, `DistSquared`, `Dist2D`, `DotProduct`, `FMath::Min`/`Max`, and moves a local's declaration up or down one statement | ChoosePlayerStart's `Dist( a, b )` -> `Dist( b, a )` is now among its candidates |
 | A-9 | `./port msvc match` names the shipped instruction at each first difference from one objdump (it ran a full `--disasm` per differing function), and matching compiles (`msvc match`, the permuter) leave out `/Z7 /Zo`: the same code (5,742 of 5,742 functions), the back end 10-12 s -> 3.3 s; `--debug-info` keeps them | 81.6 s -> about 40 s quiet (match 37.7 s -> 4.9 s, compile 36-40 s -> 32-34 s), the output identical line for line. Not under 30 s: the compiler's front end alone takes 24-29 s |
+
+### Done (2026-11-03, batch "Finish")
+
+What session B's recovery asked of the tools, by session A of batch "Finish":
+
+| # | Command | What it changed |
+|---|---|---|
+| A-1 | `./port decomp <dll> --match <obj> --diff NAME` | each relocated call or tail call shows its callee after it, on both sides: the shipped one from the PDB and the import table (as `--disasm`), ours from the object's relocation symbol: `> +00006  call <reloc>  ; FSoftObjectPath::ResolveObject`. Shown only: the alignment, score and verdict are unchanged. Session B's extra `TSoftClassPtr::Get` in `TryGiveStartingRecipes` took four rounds to find without it |
+| A-2 | `./port decomp <dll> --disasm AFGGameState::PostLoadGame_Implementation` | a virtual overriding one of a base at a non-zero offset runs with `this` on that base; the PDB records it as the member function type's this adjustment (its `this` local is still typed as the class). The function's own `this` (not an inlinee's) then names members by their offset in the object, and the listing says once `; this is AFGGameState's IFGSaveInterface base (+0x328)`: `[r14 + 0x370]` reads `this->mBuildableLightColorSlots.ArrayNum` (it read a member 0x328 bytes too low), `[rcx - 0x58]` `this->PlayerArray.ArrayNum` (unnamed before) |
+| A-3 | `./port decomp <dll> --match <obj> --diff NAME` | `verdict: stack layout only (frame 0x188 vs 0x1c8)` when every differing instruction is the same but for its `[rsp/rbp + n]` and the frame's size: temporaries at other stack offsets (session B's `DeserializeGameModeSetting`, its two FVariant at `[rsp + 0x30]` / `[rsp + 0x48]`). After `stack slots only` (a one-to-one renaming), before `register allocation only` |
+| A-4 | `./port hooks <dll> --objects DIR --recovered FGGameState.cpp --out FILE` | nothing to change: slots already come from the PDB's public symbols, not the export table, so `UFGDownloadPlayerAvatarImageTask::DownloadAvatarImage` (not exported, rva 0x77fbd0) gets an `__imp_` slot or a thunk. Now tested; a name no PDB has is left to the linker, whose unresolved external names it (no stub) |
 
 Still to do: 3 (a decompiler draft), 4 (skeletons from the PDB), 5 (systematic differences fixed once) and 13 (stubs
 that log, with the native milestones).
