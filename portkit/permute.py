@@ -279,8 +279,117 @@ def r_const(body, rng):
     return body[:m.start()] + m.group(1) + ("" if m.group(2) else "const ") + m.group(3) + body[m.end():]
 
 
+COMMUTATIVE = (" == ", " != ", " + ", " * ", " & ", " | ", " ^ ")
+LEFT_EDGE = re.compile(r"(?:[(,=?:]|\breturn|&&|\|\|)\s*$")
+RIGHT_EDGE = re.compile(r"\s*(?:[),;?:]|&&|\|\|)")
+
+
+def _operand_end(text, i):
+    """The end of the operand starting at text[i]: a name or a number, then members, scopes, calls and
+    subscripts; or a parenthesized expression. None where none starts."""
+    m = re.match(rf"{IDENT}|\d[\w.]*|\(", text[i:])
+    if not m:
+        return None
+    j = _match_close(text, i) + 1 if m.group(0) == "(" else i + m.end()
+    while j < len(text):
+        if m := re.match(rf"(?:->|\.|::){IDENT}", text[j:]):
+            j += m.end()
+        elif text[j] in "([":
+            j = _match_close(text, j, text[j], ")" if text[j] == "(" else "]") + 1
+        else:
+            break
+    return j
+
+
+def r_swap_operands(body, rng):
+    """a == b -> b == a, and the same for != + * & | ^: only where the expression is a whole operand of its
+    own (between brackets, commas, =, return, && or ||), so precedence keeps its meaning."""
+    options = []
+    for op in COMMUTATIVE:
+        for m in re.finditer(re.escape(op), body):
+            k, r0 = m.start(), m.end()
+            r1 = _operand_end(body, r0)
+            if r1 is None or not RIGHT_EDGE.match(body, r1):
+                continue
+            for l0 in range(k - 1, max(k - 200, 0), -1):
+                if (l0 == 0 or not re.match(r"[\w.>:]", body[l0 - 1])) and _operand_end(body, l0) == k:
+                    if LEFT_EDGE.search(body[:l0]):
+                        options.append((l0, k, r0, r1))
+                    break
+    if not options:
+        return None
+    l0, k, r0, r1 = rng.choice(options)
+    return body[:l0] + body[r0:r1] + body[k:r0] + body[l0:k] + body[r1:]
+
+
+SYMMETRIC = ("Dist", "DistSquared", "Dist2D", "DistSquared2D", "DistXY", "DistSquaredXY", "DotProduct", "Min", "Max")
+
+
+def _arguments(text):
+    """(start, end) of each top-level argument of an argument list's text, spaces trimmed."""
+    out, depth, start = [], 0, 0
+    for i, c in enumerate(text + ","):
+        if c in "([{":
+            depth += 1
+        elif c in ")]}":
+            depth -= 1
+        elif c == "," and depth == 0:
+            piece = text[start:i]
+            out.append((start + len(piece) - len(piece.lstrip()), i - (len(piece) - len(piece.rstrip()))))
+            start = i + 1
+    return out
+
+
+def r_swap_arguments(body, rng):
+    """The two arguments of a symmetric call swapped: FVector::Dist( a, b ) -> FVector::Dist( b, a ), and
+    DistSquared, Dist2D, DotProduct, FMath::Min and Max."""
+    options = []
+    for m in re.finditer(rf"\b(?:{IDENT}::)*(?:{'|'.join(SYMMETRIC)})\s*(?:<[^<>()]*>)?\s*\(", body):
+        close = _match_close(body, m.end() - 1)
+        args = _arguments(body[m.end():close])
+        if len(args) == 2 and all(a < b for a, b in args):
+            options.append([(m.end() + a, m.end() + b) for a, b in args])
+    if not options:
+        return None
+    (a0, a1), (b0, b1) = rng.choice(options)
+    return body[:a0] + body[b0:b1] + body[a1:b0] + body[a0:a1] + body[b1:]
+
+
+def r_move_declaration(body, rng):
+    """A local's declaration moved up or down one statement, in any block: not past a statement that uses
+    the name, nor above one that declares a name its initializer uses."""
+    options = []
+    for b0 in [i for i, c in enumerate(body) if c == "{"]:
+        try:
+            block = body[b0:_match_close(body, b0, "{", "}") + 1]
+            sts = statements(block)
+        except Fail:
+            continue
+        for k, (a, e) in enumerate(sts):
+            name = _declared(block[a:e])
+            if not name or "{" in block[a:e]:
+                continue
+            for other in (k - 1, k + 1):
+                if not 0 <= other < len(sts):
+                    continue
+                oa, oe = sts[other]
+                st = block[oa:oe]
+                if re.match(r"(return|break|continue|goto|case|default)\b", st) or re.search(rf"\b{name}\b", st):
+                    continue
+                if (theirs := _declared(st)) and re.search(rf"\b{theirs}\b", block[a:e]):
+                    continue
+                first, second = sorted([(a, e), (oa, oe)])
+                if block[first[1]:second[0]].strip():
+                    continue  # a comment between them
+                options.append((b0 + first[0], b0 + first[1], b0 + second[0], b0 + second[1]))
+    if not options:
+        return None
+    f0, f1, s0, s1 = rng.choice(options)
+    return body[:f0] + body[s0:s1] + body[f1:s0] + body[f0:f1] + body[s1:]
+
+
 REWRITES = [r_swap_statements, r_introduce_temp, r_remove_temp, r_split_if_init, r_invert_early_return,
-            r_swap_if_else, r_condition, r_cast, r_const]
+            r_swap_if_else, r_condition, r_cast, r_const, r_swap_operands, r_swap_arguments, r_move_declaration]
 
 
 def mutate(body, rng, max_steps=2):

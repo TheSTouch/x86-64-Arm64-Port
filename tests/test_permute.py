@@ -96,6 +96,33 @@ class RewriteTest(unittest.TestCase):
         self.assertIn("static_cast< int32 >( Limit )", cast)
         self.assertIn("\tint32 n = Count();", permute.r_const(body_of("UFoo::Tick"), self.rng))
 
+    def test_swap_commutative_operands(self):
+        body = "{\n\tconst float d = a->x * b->y;\n\tif( GetCount() == n && Ok( c + 1, s | t ) ) { Go(); }\n\treturn a + b * c;\n}"
+        seen = {permute.r_swap_operands(body, random.Random(seed)) for seed in range(40)}
+        self.assertIn(body.replace("a->x * b->y", "b->y * a->x"), seen)
+        self.assertIn(body.replace("GetCount() == n", "n == GetCount()"), seen)
+        self.assertIn(body.replace("c + 1", "1 + c"), seen)
+        self.assertIn(body.replace("s | t", "t | s"), seen)
+        self.assertFalse(any("b + a" in x or "c * b" in x for x in seen if x))   # a + b * c: not a whole operand
+        self.assertIsNone(permute.r_swap_operands("{\n\treturn a - b;\n}", self.rng))
+
+    def test_swap_the_arguments_of_symmetric_calls(self):
+        body = "{\n\tconst double d = FVector::Dist( Start->GetActorLocation(), Location );\n\treturn FMath::Max( d, Get( 1, 2 ) );\n}"
+        seen = {permute.r_swap_arguments(body, random.Random(seed)) for seed in range(20)}
+        self.assertIn(body.replace("Dist( Start->GetActorLocation(), Location )", "Dist( Location, Start->GetActorLocation() )"), seen)
+        self.assertIn(body.replace("Max( d, Get( 1, 2 ) )", "Max( Get( 1, 2 ), d )"), seen)
+        self.assertIsNone(permute.r_swap_arguments("{\n\treturn Lerp( a, b );\n}", self.rng))
+
+    def test_move_a_declaration_one_statement(self):
+        body = body_of("UFoo::Tick")
+        seen = {permute.r_move_declaration(body, random.Random(seed)) for seed in range(30)}
+        self.assertIn(body.replace("mB = dt;\n\tconst int32 n = Count();", "const int32 n = Count();\n\tmB = dt;"), seen)
+        for moved in seen:   # never past the statement that uses it
+            self.assertLess(moved.index("const int32 n"), moved.index("Use( n )"))
+        nested = "{\n\tif( a )\n\t{\n\t\tGo();\n\t\tconst int32 k = 2;\n\t\tUse( k );\n\t}\n}"
+        self.assertEqual(permute.r_move_declaration(nested, random.Random(0)),
+                         nested.replace("Go();\n\t\tconst int32 k = 2;", "const int32 k = 2;\n\t\tGo();"))
+
     def test_mutate_changes_something(self):
         rng = random.Random(5)
         for name in ("UFoo::GetBar", "UFoo::GetLimit", "UFoo::Tick"):
