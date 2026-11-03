@@ -265,6 +265,25 @@ class DecompTest(unittest.TestCase):
         self.assertFalse(decomp._is_game_source("D:\\W\\Engine\\Source\\Runtime\\Core\\Array.h"))
         self.assertFalse(decomp._is_game_source("D:\\W\\Game\\Intermediate\\Build\\UHT\\Screen.gen.cpp"))
 
+    def test_a_source_file_brings_its_lambdas_compiled_elsewhere(self):
+        # a lambda passed as a TFunction is compiled into the TFunction's code, its source Function.h: still the
+        # file's, by the function it is scoped in
+        m = decomp.Module(self.dll)
+        wrapper = "TFunctionRefCaller<`FGScreen::Construct'::`5'::<lambda_1>,void>::Call"
+        m.functions += [pdb.Function(wrapper, 1, 0x200, 8, "Module.Game.1.cpp.obj", source="D:\\Engine\\Function.h"),
+                        pdb.Function("TFunctionRefCaller<`FGOther::Run'::`2'::<lambda_1>,void>::Call", 1, 0x210, 8,
+                                     "Module.Game.1.cpp.obj", source="D:\\Engine\\Function.h")]
+        self.assertEqual([f.name for f in m.game_functions("Screen.cpp")], ["FGScreen::Construct", wrapper])
+        self.assertNotIn(wrapper, [f.name for f in m.game_functions()])   # the game's own sources: as they were
+        # in a dump, a function without a source file (a TFunction's deleting destructor) goes to no-source/
+        sourceless = pdb.Function("TFunction_OwnedObject<`FGScreen::Construct'::`5'::<lambda_1>>::"
+                                  "`scalar deleting destructor'", 1, 0x60, 8, "Module.Game.1.cpp.obj")
+        with mock.patch.object(decomp.Module, "game_functions", return_value=[m.function("FGScreen::Construct"),
+                                                                              sourceless]):
+            root, _ = decomp.dump(self.dll, self.dir / "work", "Screen.cpp")
+        self.assertEqual(len(list((root / "no-source").glob("*.asm"))), 1)
+        self.assertIn("\tno-source\t", (root / "functions.Screen.cpp.tsv").read_text())
+
     def test_dump_refuses_a_folder_inside_this_repository(self):
         with self.assertRaises(decomp.Fail):
             decomp.dump(self.dll, Path(__file__).resolve().parent / "out", "\\Game\\Source\\")

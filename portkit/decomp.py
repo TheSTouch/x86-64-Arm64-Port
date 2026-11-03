@@ -104,9 +104,14 @@ class Module:
 
     def game_functions(self, source_marker=None):
         """The functions compiled from the game's own sources: a source path containing `source_marker`, or by
-        default a \\Source\\ path outside the engine, UHT's generated files and third-party code."""
+        default a \\Source\\ path outside the engine, UHT's generated files and third-party code. With a
+        marker, also what is scoped in those functions but compiled from elsewhere: a lambda passed as a
+        TFunction is in TFunctionRefCaller<`F'::`5'::<lambda_1>,void>::Call, its source Function.h."""
         if source_marker:
-            return [f for f in self.functions if f.source and source_marker.lower() in f.source.lower()]
+            marker = source_marker.lower()
+            names = {f.name for f in self.functions if f.source and marker in f.source.lower()}
+            return [f for f in self.functions if f.source and marker in f.source.lower() or "`" in f.name and
+                    any(scope in names for scope in re.findall(r"`([^`']+)'", f.name))]
         return [f for f in self.functions if f.source and _is_game_source(f.source)]
 
     def _bytes_at(self, rva, n, data_only=False):
@@ -524,9 +529,10 @@ def dump(dll, out, source_marker=None):
     rows = ["name\trva\tlength\tsource\tfirst_line\tlast_line\tlocals\tmangled\tspan"]
     written = set()
     for f in (fns := m.game_functions(source_marker)):
-        source = Path(f.source.replace("\\", "/")).name
+        source = _base(f.source) if f.source else "no-source"   # a compiler-made function, no line information
         rows.append("\t".join([f.name, f"{m.rva(f.segment, f.offset):#x}", str(f.length), source,
-                               str(f.first_line), str(f.last_line), ",".join(f.locals), f.mangled or "", span(f)]))
+                               str(f.first_line), str(f.last_line), ",".join(f.locals), f.mangled or "",
+                               span(f) or ""]))
         folder = root / source
         folder.mkdir(exist_ok=True)
         target = folder / f"{_safe(f.name)}.asm"
