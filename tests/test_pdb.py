@@ -56,11 +56,13 @@ def info_stream(names_stream):
     return out
 
 
-def build_pdb(folded=False, fields=False, twin=False):
+def build_pdb(folded=False, fields=False, twin=False, adjust=0):
     """Stream 5 is the module, 6 the symbol records (publics), 7 /names. folded: a second function at
     FGScreen::Construct's address, with its own line subsection after Construct's. fields: Construct's typed
     locals and where they live (FIELDS_CODE). twin: TScreen<int>::Construct at 0x80 (0x40 bytes), from the
-    same lines as FGScreen::Construct (a template instance)."""
+    same lines as FGScreen::Construct (a template instance). adjust: Construct overrides a virtual of Screen's
+    second base, ISave at +adjust, so its `this` points there (build_tpi); with fields, `this` is also in r14
+    from +0xb for 4 bytes."""
     files = b"\0D:\\Game\\Source\\Game\\Private\\Screen.cpp\0D:\\Engine\\Core\\Array.h\0"
     names = struct.pack("<III", 0xEFFEEFFE, 1, len(files)) + files
     # module stream: signature, then symbols, then C13 line info
@@ -78,6 +80,8 @@ def build_pdb(folded=False, fields=False, twin=False):
         def where(start, length, *gaps):  # a range at section offset 0x10 + start, and its gaps
             return struct.pack("<IHH", 0x10 + start, 1, length) + b"".join(struct.pack("<HH", *g) for g in gaps)
         body += rec(0x113E, struct.pack("<IH", 0x1005, 1) + b"this\0")            # no range: rcx at entry
+        if adjust:
+            body += rec(0x1141, struct.pack("<HH", 342, 0) + where(0x0b, 4))      # r14
         body += rec(0x113E, struct.pack("<IH", 0x1005, 0) + b"Widget\0")
         body += rec(0x1141, struct.pack("<HH", 328, 0) + where(0x14, 0x0a))       # rax, +0x14..+0x1e
         body += rec(0x113E, struct.pack("<IH", 0x1005, 0) + b"Other\0")
@@ -88,7 +92,7 @@ def build_pdb(folded=False, fields=False, twin=False):
         body += rec(0x1012, struct.pack("<IIIIIHI", 0x80, 0, 0, 0, 0, 0, 1 << 14 | 1 << 16))  # frame: rsp
     head = len(rec(0x1110, b"\0" * 35 + b"FGScreen::Construct\0"))
     end_at = len(syms) + head + len(body)  # the S_END closing the procedure
-    proc = rec(0x1110, struct.pack("<IIIIIIIIHB", 0, end_at, 0, 0x40, 4, 0x3C, 0x1007, 0x10, 1, 0)
+    proc = rec(0x1110, struct.pack("<IIIIIIIIHB", 0, end_at, 0, 0x40, 4, 0x3C, 0x1015 if adjust else 0x1007, 0x10, 1, 0)
                + b"FGScreen::Construct\0")
     syms += proc + body + rec(0x0006, b"")
     syms += rec(0x110F, struct.pack("<IIIIIIIIHB", 0, 0, 0, 0x8, 0, 8, 0, 0x60, 1, 0) + b"`anonymous'::Helper\0")
@@ -127,7 +131,7 @@ def build_pdb(folded=False, fields=False, twin=False):
     dbi = struct.pack("<iIIHHHHHH", -1, 19990903, 1, 0xFFFF, 0, 0xFFFF, 0, 6, 0)
     dbi += struct.pack("<iiiiiIiiHHI", len(modi), 0, 0, 0, 0, 0, 0, 0, 0, 0x8664, 0) + modi
     publics = rec(0x110E, struct.pack("<IIH", 2, 0x10, 1) + b"?Construct@FGScreen@@QEAAXAEBUFArguments@1@@Z\0")
-    return msf([b"", info_stream(7), build_tpi(), dbi, build_ipi(), module, publics, names])
+    return msf([b"", info_stream(7), build_tpi(adjust), dbi, build_ipi(), module, publics, names])
 
 
 def leaf(kind, body):
@@ -154,8 +158,10 @@ def build_ipi():
     return struct.pack("<IIIII", 20040203, 56, 0x1000, 0x1000 + len(records), len(data)) + b"\0" * 36 + data
 
 
-def build_tpi():
-    """Types from 0x1000: a base with a virtual function, a class deriving from it, a pointer to it."""
+def build_tpi(adjust=0):
+    """Types from 0x1000: a base with a virtual function, a class deriving from it, a pointer to it. adjust:
+    Screen also derives from ISave at +adjust (and grows to hold it), and 0x1015 is a member function of
+    Screen whose `this` points at that base."""
     T = 0x1000
     records = [
         # 0x1000: the base's field list: vfptr, an introducing virtual at vtable offset 0x80, an int at +8
@@ -173,9 +179,10 @@ def build_tpi():
              + sub(0x150D, struct.pack("<HIH", 1, 0x100B, 0x10) + b"mSlots\0")
              + sub(0x150D, struct.pack("<HIH", 1, 0x100A, 0x20) + b"mPair\0")
              + sub(0x150D, struct.pack("<HIH", 1, 0x1005, 0x40) + b"mWidget\0")
-             + sub(0x150D, struct.pack("<HIH", 1, 0x20, 0x50) + b"mType\0")),
-        # 0x1004: class Screen, size 0x58
-        leaf(0x1504, struct.pack("<HHIIIH", 4, 0, 0x1003, 0, 0, 0x58) + b"Screen\0"),
+             + sub(0x150D, struct.pack("<HIH", 1, 0x20, 0x50) + b"mType\0")
+             + (sub(0x1400, struct.pack("<HIH", 3, 0x1014, adjust)) if adjust else b"")),
+        # 0x1004: class Screen, size 0x58 (with ISave, past it)
+        leaf(0x1504, struct.pack("<HHIIIH", 4, 0, 0x1003, 0, 0, max(0x58, adjust + 8)) + b"Screen\0"),
         # 0x1005: Screen*
         leaf(0x1002, struct.pack("<II", 0x1004, 0x1000C)),
         # 0x1006: vtable shape (unused here)
@@ -204,6 +211,11 @@ def build_tpi():
              + sub(0x150D, struct.pack("<HIH", 3, 0x1010, 4) + b"E\0")),
         # 0x1012: struct FFlags, size 8
         leaf(0x1505, struct.pack("<HHIIIH", 5, 0, 0x1011, 0, 0, 8) + b"FFlags\0"),
+        # 0x1013: ISave's field list: its vfptr; 0x1014: class ISave, size 8
+        leaf(0x1203, sub(0x1409, struct.pack("<HI", 0, 0x1006))),
+        leaf(0x1504, struct.pack("<HHIIIH", 1, 0, 0x1013, 0, 0, 8) + b"ISave\0"),
+        # 0x1015: void (Screen::*)(const char*), `this` adjusted by `adjust`
+        leaf(0x1009, struct.pack("<IIIBBHIi", 0x0003, 0x1004, 0x1005, 0, 0, 1, 0x1008, adjust)),
     ]
     data = b"".join(records)
     header = struct.pack("<IIIII", 20040203, 56, T, T + len(records), len(data)) + b"\0" * 36

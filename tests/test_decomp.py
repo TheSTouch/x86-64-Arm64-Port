@@ -98,6 +98,36 @@ class DecompTest(unittest.TestCase):
             "+0002a": "",               # a store ending Copy's range: what it writes is no longer Copy
             "+0002e": ""})
 
+    @unittest.skipUnless(shutil.which("objdump"), "needs objdump (Xcode command line tools)")
+    def test_fields_named_from_the_object_when_this_is_a_secondary_base(self):
+        # Construct overrides a virtual of ISave, Screen's base at +0x58: `this` points there, in rcx at entry
+        # and in r14 from +0xb (the PDB's range); members are named by their offset in Screen
+        code = bytes.fromhex(
+            "488b41e8"          # +00 mov rax, qword ptr [rcx - 0x18]: 0x40
+            "0fb641f8"          # +04 movzx eax, byte ptr [rcx - 0x8]: 0x50
+            "4989ce"            # +08 mov r14, rcx
+            "418b56cc"          # +0b mov edx, dword ptr [r14 - 0x34]: 0x24
+            "ff151b100000"      # +0f call [rip -> IAT slot 0x2040]: ExitProcess
+            "c3")               # +15 ret
+        data = bytearray(self.dll.read_bytes())
+        data[0x410:0x410 + len(code)] = code
+        self.dll.write_bytes(bytes(data))
+        self.dll.with_suffix(".pdb").write_bytes(build_pdb(fields=True, adjust=0x58))
+        m = decomp.Module(self.dll)
+        f = m.function("FGScreen::Construct")
+        self.assertEqual(m.types.this_adjust(f.type_index), (0x1004, 0x58))
+        self.assertEqual(m.types.base_at(0x1004, 0x58), "ISave")
+        variables = {v.name: v for v in m.details.detail(f).variables}
+        self.assertEqual((variables["this"].inlined, variables["Inlined"].inlined), (False, True))
+        text = m.disassemble(f, length=len(code))
+        self.assertIn("; this is Screen's ISave base (+0x58)\n", text)
+        notes = {line.split()[0]: line.partition(" ; ")[2] for line in text.splitlines() if line.startswith("  +")}
+        self.assertEqual(notes, {"+00000": "this->mWidget", "+00004": "this->mType", "+00008": "",
+                                 "+0000b": "this->mPair.B", "+0000f": "KERNEL32.dll!ExitProcess", "+00015": ""})
+        # a function whose `this` is the object itself: no line, members as they were
+        self.dll.with_suffix(".pdb").write_bytes(build_pdb(fields=True))
+        self.assertNotIn("; this is", decomp.Module(self.dll).disassemble(f, length=len(code)))
+
     def test_the_bits_an_instruction_reaches(self):
         self.assertEqual(decomp._mask("test", "byte ptr [rbx + 0x2b], 0x20", 1), 0x20)
         self.assertEqual(decomp._mask("or", "byte ptr [rbx + 0x2b], 0x3", 1), 0x3)

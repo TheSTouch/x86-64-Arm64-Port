@@ -196,6 +196,10 @@ class Module:
         if f.locals:
             lines.append("; locals: " + ", ".join(
                 f"{self.types.name(f.local_types[n])} {n}" if n in f.local_types else n for n in f.locals))
+        if adjusted := self.types.this_adjust(f.type_index):
+            cls, at = self.types.name(adjusted[0]), adjusted[1]
+            inner = self.types.base_at(*adjusted)
+            lines.append(f"; this is {cls}'s {inner} base (+{at:#x})" if inner else f"; this is {cls} + {at:#x}")
         rows = []
         for raw in out.stdout.splitlines():
             if not (hit := LINE.match(raw)):
@@ -229,12 +233,16 @@ class _Fields:
     `Local.mBar`, `&this->mFoo` for a lea. A store into a variable's memory is named only if the variable
     still lives there after it. Besides the PDB's ranges, `this` is in rcx at entry: up to the first
     instruction that writes rcx or calls (included: it reads its operands first), and not past where a jump
-    from further on lands."""
+    from further on lands. Where the function's type says its `this` points at a base inside the object (a
+    virtual of a base at a non-zero offset), the function's own `this` names members by their offset in the
+    object: [this + disp] is the object's disp + that base's offset."""
 
     def __init__(self, types, detail, f, rows):
         self.types, self.variables = types, detail.variables if detail else []
         this = f.local_types.get("this")
         self.this = types.pointee(this) if this is not None else None
+        adjusted = types.this_adjust(f.type_index) if self.this is not None else None
+        self.adjust = adjusted[1] if adjusted else 0
         self.entry = -1
         if self.this is not None and rows:
             self.entry = next((o for o, insn, _ in rows if _writes_rcx(insn)), rows[-1][0])
@@ -264,7 +272,8 @@ class _Fields:
                 if r != reg or not any(a <= offset < b for a, b in ranges):
                     continue
                 if kind == "register" and (target := t.pointee(v.type_index)):
-                    if path := t.field_path(target, disp, size, mask):
+                    own = v.name == "this" and not v.inlined
+                    if path := t.field_path(target, disp + (self.adjust if own else 0), size, mask):
                         return f"{v.name}->{path}"
                 elif kind == "field" and (held := t.member_at(v.type_index, at)):
                     if (target := t.pointee(held[1])) and (path := t.field_path(target, disp, size, mask)):
@@ -276,7 +285,8 @@ class _Fields:
                     if path:
                         return _join(v.name, path)
                     return v.name + (f"+{disp - at:#x}" if path is None and disp != at else "")
-        if reg == REGISTERS["rcx"] and offset <= self.entry and (path := t.field_path(self.this, disp, size, mask)):
+        if reg == REGISTERS["rcx"] and offset <= self.entry and \
+                (path := t.field_path(self.this, disp + self.adjust, size, mask)):
             return f"this->{path}"
         return None
 

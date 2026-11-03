@@ -65,6 +65,7 @@ class Variable:
     type_index: int
     homes: list = field(default_factory=list)  # (kind, register, offset, [(start, end)]): where it lives, when
     param: bool = False
+    inlined: bool = False  # an inline site's, not the function's own
 
 
 # Home kinds: "register": the value is in the register; "field": the variable's field at `offset` is in the
@@ -497,12 +498,14 @@ class Details:
                 scopes.pop()
             elif kind == S_LOCAL and len(body) >= 6:
                 ti, flags = struct.unpack_from("<IH", body)
-                variable = Variable(_cstr(body, 6), ti, param=bool(flags & 1))
+                variable = Variable(_cstr(body, 6), ti, param=bool(flags & 1),
+                                    inlined=any(k == "inline" for k, _ in scopes))
                 out.variables.append(variable)
                 continue
             elif kind == S_REGREL32 and len(body) >= 10:
                 at, ti, reg = struct.unpack_from("<iIH", body)
-                out.variables.append(Variable(_cstr(body, 10), ti, [("memory", reg, at, scopes[-1][1])]))
+                out.variables.append(Variable(_cstr(body, 10), ti, [("memory", reg, at, scopes[-1][1])],
+                                              inlined=any(k == "inline" for k, _ in scopes)))
             elif kind == S_FRAMEPROC and len(body) >= 26:
                 frame = struct.unpack_from("<I", body, 22)[0]
             elif variable is not None and kind == S_DEFRANGE_REGISTER and len(body) >= 12:
@@ -671,6 +674,27 @@ class Types:
         if kind not in (LF_PROCEDURE, LF_MFUNCTION):
             return name
         return f"{self.name(struct.unpack_from('<I', body)[0])} {self.signature(ti, name)}"
+
+    def this_adjust(self, ti):
+        """(class type index, offset) for a member function type whose `this` points `offset` bytes into its
+        class (LF_MFUNCTION's this adjustment: MSVC runs a virtual function overriding one of a base at a
+        non-zero offset with `this` on that base); None for anything else, or an adjustment of 0."""
+        kind, body = self.record(ti)
+        if kind != LF_MFUNCTION or len(body) < 24:
+            return None
+        cls, adjust = struct.unpack_from("<I", body, 4)[0], struct.unpack_from("<i", body, 20)[0]
+        return (self.resolve(cls), adjust) if adjust else None
+
+    def base_at(self, ti, offset, depth=0):
+        """The name of the base class that starts `offset` bytes into class ti, outermost first; a base's own
+        base when the offset is inside it; None if no base starts there."""
+        u = self.udt_at(ti)
+        if u is None or depth > 12:
+            return None
+        for o, n, t in u.fields:
+            if n is None and o is not None and o <= offset < o + max(self.size(t), 1):
+                return self.name(self.resolve(t)) if o == offset else self.base_at(t, offset - o, depth + 1)
+        return None
 
     def udt(self, name):
         ti = self._index().get(name)
