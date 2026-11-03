@@ -384,6 +384,15 @@ class CacheTest(unittest.TestCase):
             self.assertEqual(pdb.public_symbols(self.path), pubs)
             self.assertEqual(pdb.publics(self.path), {(1, 0x10): pubs[0][0]})
 
+    def test_the_type_stream_is_indexed_once(self):
+        offsets, names = pdb.Types(self.path).offsets, pdb.Types(self.path)._index()
+        self.assertEqual(names["Screen"], 0x1004)
+        with mock.patch.object(pdb.Types, "_scan", side_effect=AssertionError("scanned again")), \
+                mock.patch.object(pdb.Types, "_names", side_effect=AssertionError("indexed again")):
+            types = pdb.Types(self.path)
+            self.assertEqual((types.offsets, types._index()), (offsets, names))
+            self.assertEqual(types.udt("Screen").size, 0x58)
+
     def test_a_changed_pdb_is_read_again_and_its_old_entry_removed(self):
         self.assertEqual([f.name for f in pdb.functions(self.path)][-1], "`anonymous'::Helper")
         self.path.write_bytes(build_pdb(twin=True))

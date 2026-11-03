@@ -9,6 +9,7 @@ each typed local lives; `Types.field_path` names the member at an offset.
 A large PDB's functions and public symbols are kept on disk once read (config.PDB_CACHE).
 """
 
+import array
 import glob
 import hashlib
 import math
@@ -641,16 +642,22 @@ class Types:
     stream=4, the IPI stream (function ids), which has the same layout."""
 
     def __init__(self, path, stream=2):
+        self.path, self.stream = path, stream
         with MSF(path) as m:
             self.buf = m.read(stream)
         if len(self.buf) < 56:
             raise NotPDB(f"{path}: no type stream")
         _, header, self.first, self.end, size = struct.unpack_from("<IIIII", self.buf)
-        self.offsets, off = [], header
-        while off + 4 <= min(header + size, len(self.buf)):
-            self.offsets.append(off)
-            off += 2 + struct.unpack_from("<H", self.buf, off)[0]
+        self.offsets = _cached(f"type_offsets{stream}", path, lambda _: self._scan(header, size))
         self._by_name, self._layouts = None, {}
+
+    def _scan(self, header, size):
+        """Where each record starts in the stream, by type index."""
+        out, off = array.array("I"), header
+        while off + 4 <= min(header + size, len(self.buf)):
+            out.append(off)
+            off += 2 + struct.unpack_from("<H", self.buf, off)[0]
+        return out
 
     def record(self, ti):
         i = ti - self.first
@@ -662,13 +669,18 @@ class Types:
 
     def _index(self):
         if self._by_name is None:
-            self._by_name = {}
-            for i, off in enumerate(self.offsets):
-                kind, prop = struct.unpack_from("<HH", self.buf, off + 2)[0], struct.unpack_from("<H", self.buf, off + 6)[0]
-                if kind in UDTS and not prop & 0x80:  # 0x80: a forward reference
-                    _, body = self.record(self.first + i)
-                    self._by_name.setdefault(self._udt_name(kind, body), self.first + i)
+            self._by_name = _cached(f"type_names{self.stream}", self.path, lambda _: self._names())
         return self._by_name
+
+    def _names(self):
+        """{name: type index} of every class, struct, union and enum defined (the first of a name)."""
+        out = {}
+        for i, off in enumerate(self.offsets):
+            kind, prop = struct.unpack_from("<HH", self.buf, off + 2)[0], struct.unpack_from("<H", self.buf, off + 6)[0]
+            if kind in UDTS and not prop & 0x80:  # 0x80: a forward reference
+                _, body = self.record(self.first + i)
+                out.setdefault(self._udt_name(kind, body), self.first + i)
+        return out
 
     @staticmethod
     def _udt_name(kind, body):
