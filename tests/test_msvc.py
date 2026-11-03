@@ -127,6 +127,11 @@ class ResponseFileTest(unittest.TestCase):
             self.assertIn("RECOMP_HOOKS 0", (tmp / "out" / "Definitions.M.h").read_text())
             self.assertEqual(lines[0], msvc.wine_path(tmp / "project" / "Source/M/Private/Recovered/Module.FactoryGame.101.cpp"))
             self.assertIn(f'/I {msvc.quote(msvc.wine_path(tmp / "engine" / "Engine" / "Source"))}', lines)
+            with_debug = msvc.command_for(tmp / "project", "M", "Module.FactoryGame.101.cpp", tmp / "out", mapper=m,
+                                          text=self.RSP + "/Z7\r\n/Zo\r\n/Ox\r\n", debug_info=True).lines()
+            without = msvc.command_for(tmp / "project", "M", "Module.FactoryGame.101.cpp", tmp / "out", mapper=m,
+                                       text=self.RSP + "/Z7\r\n/Zo\r\n/Ox\r\n", debug_info=False).lines()
+            self.assertEqual(sorted(set(with_debug) - set(without)), ["/Z7", "/Zo"])
 
 
 class PathMapTest(unittest.TestCase):

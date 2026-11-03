@@ -797,8 +797,12 @@ def match(dll, obj, diff=()):
             results.append(Match(fn.name, "missing", detail="no function of that name in the shipped module"))
             continue
         results.append(_compare(m, fn, shipped, how))
-        pairs.append((results[-1], fn, shipped))
+        pairs.append((len(results) - 1, fn, shipped, how))
         m.paired[fn.name] = m.rva(shipped.segment, shipped.offset)
+    differing = [x for x in pairs if results[x[0]].state == "differs"]
+    for (i, fn, f, how), insn in zip(differing, _instructions_at(m, [(f, results[i].offset) for i, _, f, _ in differing])):
+        results[i] = _compare(m, fn, f, how, insn)  # the shipped instruction where they first differ, named
+    pairs = [(results[i], fn, f) for i, fn, f, _ in pairs]
     _align(m, [(r, fn, f) for r, fn, f in pairs if r.state == "differs" or r.name in diff or r.shipped in diff])
     return results
 
@@ -1132,7 +1136,7 @@ def _disassemble(blobs):
     return [[tuple(row) for row in rows] for rows in listings]
 
 
-def _compare(m, fn, shipped, how):
+def _compare(m, fn, shipped, how, insn=None):
     ref = m._bytes_at(m.rva(shipped.segment, shipped.offset), shipped.length)
     result = Match(fn.name, "matched", shipped.name, len(ref))
     notes = [how] if how else []
@@ -1150,18 +1154,33 @@ def _compare(m, fn, shipped, how):
 
     result.state, result.offset = "differs", first
     where = f"at +{first:#x}"
-    if insn := _instruction_at(m, shipped, first):
+    if insn:
         where += f" (shipped: {insn})"
     result.detail = ", ".join([f"{where}: shipped {window(ref) or '(end)'}, compiled {window(fn.code) or '(end)'}"] + notes)
     return result
 
 
-def _instruction_at(m, f, offset):
-    """The shipped instruction covering offset, from the annotated disassembly (needs objdump)."""
-    if not objdump():
-        return None
-    best = None
-    for line in m.disassemble(f).splitlines():
-        if (hit := re.match(r"^\s+\+([0-9a-f]{5})\s+(.*?)\s*(;.*)?$", line)) and int(hit.group(1), 16) <= offset:
-            best = re.sub(r"\s+", " ", hit.group(2))
-    return best
+def _instructions_at(m, places):
+    """The shipped instruction covering each (function, offset), written as --disasm writes it (a branch
+    inside the function to +offset, one outside to its address): one objdump for them all (needs objdump)."""
+    if not places or not objdump():
+        return [None] * len(places)
+    listings = _disassemble([m._bytes_at(m.rva(f.segment, f.offset), f.length) for f, _ in places])
+    out = []
+    for (f, offset), listing in zip(places, listings):
+        best = None
+        for at, _, text in listing:
+            if at > offset:
+                break
+            best = text
+        if best is not None:
+            best = re.sub(r"\s*<[^>]*>", "", best).strip().partition(" # ")[0]
+            if hit := re.fullmatch(r"(j\w+|call|loop\w*)(\s+)(0x[0-9a-f]+)", best):
+                target = int(hit.group(3), 16)
+                target -= 1 << 64 if target >= 1 << 63 else 0
+                va = m.image.image_base + m.rva(f.segment, f.offset)
+                best = hit.group(1) + hit.group(2) + (f"+{target:05x}" if 0 <= target < f.length
+                                                      else f"{(va + target) % (1 << 64):#x}")
+            best = re.sub(r"\s+", " ", best)
+        out.append(best)
+    return out

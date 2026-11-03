@@ -37,6 +37,7 @@ JOINED_PATHS = ("/FI", "/Yu", "/Yc", "/Fp", "/Fo")
 # Dropped on the Mac: the SARIF log; without a PCH (pch=False) also /Yu and /Fp, its header staying forced with /FI.
 DROPPED = ("/experimental:log",)
 PCH_FLAGS = ("/Yu", "/Yc", "/Fp")
+DEBUG_FLAGS = ("/Z7", "/Zi", "/ZI", "/Zo")   # debug information only: the same code without (A-9: 5,742 of 5,742)
 SHIPPED = {"FactoryGameRecomp": "FactoryGame", "FactoryPreEarlyLoadingScreen": "FactoryPreEarlyLoadingScreen"}
 
 
@@ -445,10 +446,12 @@ def response_file(module, source_name):
     raise Fail(f"no response file for {source_name} in {local}: run ./port msvc mirror first")
 
 
-def command_for(project, module, source_name, out_dir, hooks=False, mapper=None, text=None, pch=None):
+def command_for(project, module, source_name, out_dir, hooks=False, mapper=None, text=None, pch=None,
+                debug_info=True):
     """The Mac compile of one source: the PC's response file with its paths mapped, the definitions patched for
     this kind of build, the object written to out_dir. pch: the PCH built on the Mac (`build_pch`) for /Fp, or
-    None to compile without one (its header is forced with /FI either way)."""
+    None to compile without one (its header is forced with /FI either way). debug_info False leaves out /Z7
+    and /Zo: the code is the same, the back end a third as long (matching reads no debug information)."""
     m = mapper or PathMap(project)
     work = Path(out_dir)
     work.mkdir(parents=True, exist_ok=True)
@@ -456,7 +459,8 @@ def command_for(project, module, source_name, out_dir, hooks=False, mapper=None,
                         read=lambda p: read_pc_text(m.mac(p)))
     items = []
     for o, v in cmd.items:
-        if o is not None and (o in DROPPED or (o in PCH_FLAGS and pch is None)):
+        if o is not None and (o in DROPPED or (o in PCH_FLAGS and pch is None) or
+                              (o in DEBUG_FLAGS and not debug_info)):
             continue
         if o == "/Fp":
             v = wine_path(pch)
@@ -531,12 +535,12 @@ def build_pch(pc_pch, rebuild=False):
     return pch
 
 
-def compile_one(project, module, source_name, out_dir, hooks=False, pch=True):
+def compile_one(project, module, source_name, out_dir, hooks=False, pch=True, debug_info=False):
     started = time.monotonic()
     local_pch = None
     if pch and (pc_pch := pch_of(module, source_name)):
         local_pch = build_pch(pc_pch)
-    cmd = command_for(project, module, source_name, out_dir, hooks, pch=local_pch)
+    cmd = command_for(project, module, source_name, out_dir, hooks, pch=local_pch, debug_info=debug_info)
     rsp = Path(out_dir) / f"{source_name}.rsp"
     rsp.write_text("\n".join(cmd.lines()) + "\n", encoding="utf-8")
     obj = Path(out_dir) / f"{source_name}.obj"
@@ -549,12 +553,12 @@ def compile_one(project, module, source_name, out_dir, hooks=False, pch=True):
     return Compiled(source_name, obj, time.monotonic() - started, r.returncode == 0 and obj.is_file(), output)
 
 
-def compile_many(project, module, sources, out_dir, hooks=False, jobs=2, pch=True):
+def compile_many(project, module, sources, out_dir, hooks=False, jobs=2, pch=True, debug_info=False):
     if pch:   # built once, before the parallel compiles
         for pc_pch in {p for s in sources if (p := pch_of(module, s))}:
             build_pch(pc_pch)
     with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, jobs)) as pool:
-        return list(pool.map(lambda s: compile_one(project, module, s, out_dir, hooks, pch), sources))
+        return list(pool.map(lambda s: compile_one(project, module, s, out_dir, hooks, pch, debug_info), sources))
 
 
 def shipped_dll(module):

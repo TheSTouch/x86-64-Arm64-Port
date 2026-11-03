@@ -361,7 +361,8 @@ def cmd_msvc(a):
         out = Path(a.out) if a.out else config.MSVC_BUILDS / project.name / a.module
         if config.inside_repository(out):
             raise Fail(f"{out} is inside this repository; objects compiled from recovered code stay outside it")
-        results = msvc.compile_many(project, a.module, sources, out, hooks=a.hooks, jobs=a.jobs, pch=not a.no_pch)
+        results = msvc.compile_many(project, a.module, sources, out, hooks=a.hooks, jobs=a.jobs, pch=not a.no_pch,
+                                    debug_info=a.debug_info)
         dll = msvc.shipped_dll(a.module)
         differs = failed = 0
         for c in results:
@@ -553,6 +554,8 @@ def parser():
     sp.add_argument("--jobs", type=int, default=2, help="match: parallel compiles (default: %(default)s)")
     sp.add_argument("--out", metavar="DIR", help="match: where the objects go (default: under config.MSVC_BUILDS)")
     sp.add_argument("--no-match", action="store_true", help="match: compile only")
+    sp.add_argument("--debug-info", action="store_true", help="match: keep /Z7 and /Zo, as the PC compiles (the same "
+                    "code; without them the compile is about 7 s shorter)")
     sp.add_argument("--no-pch", action="store_true", help="match: no PCH, its header forced (faster to start, but some "
                     "inlining differs from the PC's)")
     sp.add_argument("-v", "--verbose", action="store_true", help="compare: list the functions that are the same too")
