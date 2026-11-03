@@ -424,6 +424,11 @@ What session B's recovery asked of the tools, by session A of batch "Finish":
 | A-3 | `./port decomp <dll> --match <obj> --diff NAME` | `verdict: stack layout only (frame 0x188 vs 0x1c8)` when every differing instruction is the same but for its `[rsp/rbp + n]` and the frame's size: temporaries at other stack offsets (session B's `DeserializeGameModeSetting`, its two FVariant at `[rsp + 0x30]` / `[rsp + 0x48]`). After `stack slots only` (a one-to-one renaming), before `register allocation only` |
 | A-4 | `./port hooks <dll> --objects DIR --recovered FGGameState.cpp --out FILE` | nothing to change: slots already come from the PDB's public symbols, not the export table, so `UFGDownloadPlayerAvatarImageTask::DownloadAvatarImage` (not exported, rva 0x77fbd0) gets an `__imp_` slot or a thunk. Now tested; a name no PDB has is left to the linker, whose unresolved external names it (no stub) |
 
+After batch "Finish", the PDB is read once: its functions, public symbols, type record offsets and class names
+are kept in `/Volumes/SMART/TheSTouch/pdb-cache` (`PORTKIT_PDB_CACHE`; 67 MB for FactoryGame, read again when the
+PDB or the reader changes). Warm, `--disasm` takes 1.1 s (3.8 s before), `--match` of a blob 0.9 s (3.3 s), and
+every `msvc match` and permuter candidate saves as much.
+
 Still to do: 3 (a decompiler draft), 4 (skeletons from the PDB), 5 (systematic differences fixed once) and 13 (stubs
 that log, with the native milestones).
 
