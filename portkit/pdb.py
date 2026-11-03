@@ -6,12 +6,21 @@ as pdb_guid and pdb_age), every function with its source file, lines and named
 locals, and the public symbols with their decorated names. `Details` reads one
 function further: the line of every instruction, its inlined calls, and where
 each typed local lives; `Types.field_path` names the member at an offset.
+A large PDB's functions and public symbols are kept on disk once read (config.PDB_CACHE).
 """
 
+import glob
+import hashlib
 import math
+import os
+import pickle
 import re
 import struct
+import tempfile
 from dataclasses import dataclass, field
+from pathlib import Path
+
+from . import config
 
 MAGIC = b"Microsoft C/C++ MSF 7.00\r\n\x1aDS\0\0\0"
 
@@ -177,21 +186,58 @@ def _dbi(m):
     return dbi, struct.unpack_from("<H", dbi, 20)[0], struct.unpack_from("<i", dbi, 24)[0]
 
 
+CACHE_MIN = 8 << 20  # a smaller PDB reads in less time than its cached copy is worth
+_CODE = hashlib.sha1(Path(__file__).read_bytes()).hexdigest()[:12]
+
+
+def _cached(kind, path, read):
+    """read(path), kept in config.PDB_CACHE for a PDB of CACHE_MIN bytes or more. An entry is named by the
+    PDB's path, `kind`, and what decides its content: the PDB's size, time and signature, and this file's
+    code; writing one removes the PDB's older entry of that kind. Read directly when the folder's disk is not
+    there or the folder is inside this repository (what is cached comes from the game)."""
+    path = Path(path)
+    stat = path.stat()
+    root = Path(config.PDB_CACHE)
+    if stat.st_size < CACHE_MIN or config.inside_repository(root) or not root.parent.is_dir():
+        return read(path)
+    where = hashlib.sha1(str(path.resolve()).encode()).hexdigest()[:12]
+    guid, age = signature(path)
+    key = hashlib.sha1(f"{stat.st_size}:{stat.st_mtime_ns}:{guid.hex()}:{age}:{_CODE}".encode()).hexdigest()[:12]
+    entry = root / f"{path.stem}.{where}.{kind}.{key}.pickle"
+    try:
+        with open(entry, "rb") as f:
+            return pickle.load(f)
+    except Exception:  # not there, or not what was written: read the PDB
+        pass
+    value = read(path)
+    tmp = None
+    try:
+        root.mkdir(exist_ok=True)
+        for old in root.glob(f"{glob.escape(path.stem)}.{where}.{kind}.*.pickle"):
+            old.unlink(missing_ok=True)
+        fd, tmp = tempfile.mkstemp(dir=root, suffix=".tmp")
+        with os.fdopen(fd, "wb") as f:
+            pickle.dump(value, f, protocol=pickle.HIGHEST_PROTOCOL)
+        os.replace(tmp, entry)
+    except OSError:
+        if tmp:
+            Path(tmp).unlink(missing_ok=True)
+    return value
+
+
 def publics(path):
-    """{(segment, offset): decorated name} from the public symbols (S_PUB32)."""
-    with MSF(path) as m:
-        _, symrec, _ = _dbi(m)
-        out = {}
-        for _, kind, body in _records(m.read(symrec)):
-            if kind == S_PUB32 and len(body) >= 10:
-                _, off, seg = struct.unpack_from("<IIH", body)
-                out[(seg, off)] = _cstr(body, 10)
-        return out
+    """{(segment, offset): decorated name} from the public symbols (S_PUB32); of names sharing an address,
+    the last."""
+    return {(seg, off): name for name, seg, off, _ in public_symbols(path)}
 
 
 def public_symbols(path):
     """Every public symbol (S_PUB32) as (decorated name, segment, offset, flags), in the stream's order.
     flags: 1 code, 2 function. Unlike `publics`, names sharing an address (folded functions) all stay."""
+    return _cached("public_symbols", path, _read_public_symbols)
+
+
+def _read_public_symbols(path):
     with MSF(path) as m:
         _, symrec, _ = _dbi(m)
         out = []
@@ -255,6 +301,10 @@ def _subsections(c13):
 
 def functions(path):
     """Every function (S_GPROC32 / S_LPROC32) in every compiland, in address order."""
+    return _cached("functions", path, _read_functions)
+
+
+def _read_functions(path):
     with MSF(path) as m:
         dbi, _, modi_size = _dbi(m)
         names = m.read(_named_streams(m.read(1)).get("/names", 0xFFFF))

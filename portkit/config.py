@@ -107,6 +107,8 @@ MSVC_BUILDS = Path(_setting("MSVC_BUILDS", SMART / "satisfactory-builds" / "mac"
 RECOVERED_REPO = Path(_setting("RECOVERED_REPO", SMART / "satisfactory-recomp"))
 # The engine on the Mac: a clone of the tag the PC's engine was installed from.
 ENGINE_DIR = Path(_setting("ENGINE_DIR", SMART / "custom-repos" / "UnrealEngine-CSS"))
+# What pdb.py keeps of a large PDB (its functions and public symbols), to read it in a fraction of the time.
+PDB_CACHE = Path(_setting("PDB_CACHE", SMART / "pdb-cache"))
 # The shipped modules matched against, each with its PDB.
 GAME_BINARIES = Path(_setting("GAME_BINARIES", "/Volumes/SMART/SteamLibraryWindows/steamapps/common/Satisfactory/"
                                                "FactoryGame/Binaries/Win64"))

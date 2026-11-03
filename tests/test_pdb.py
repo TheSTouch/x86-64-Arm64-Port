@@ -2,8 +2,10 @@ import os
 import struct
 import tempfile
 import unittest
+from pathlib import Path
+from unittest import mock
 
-from portkit import pdb
+from portkit import config, pdb
 
 BLOCK = 0x200
 GUID = bytes(range(16))
@@ -351,3 +353,48 @@ class PDBTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CacheTest(unittest.TestCase):
+    """A large PDB's functions and public symbols are kept on disk (config.PDB_CACHE), keyed by the file, its
+    size, time and signature, and pdb.py itself: read again when any changes."""
+
+    def setUp(self):
+        d = tempfile.TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        self.dir = Path(d.name)
+        self.cache = self.dir / "cache"
+        self.cache.mkdir()
+        for name, value in (("CACHE_MIN", 0),):
+            old = getattr(pdb, name)
+            setattr(pdb, name, value)
+            self.addCleanup(setattr, pdb, name, old)
+        old = config.PDB_CACHE
+        config.PDB_CACHE = self.cache
+        self.addCleanup(setattr, config, "PDB_CACHE", old)
+        self.path = self.dir / "Game.pdb"
+        self.path.write_bytes(build_pdb())
+
+    def test_read_once_then_from_the_cache(self):
+        fns, pubs = pdb.functions(self.path), pdb.public_symbols(self.path)
+        self.assertEqual(len(list(self.cache.iterdir())), 2)
+        with mock.patch.object(pdb, "_read_functions", side_effect=AssertionError("read again")), \
+                mock.patch.object(pdb, "_read_public_symbols", side_effect=AssertionError("read again")):
+            self.assertEqual(pdb.functions(self.path), fns)
+            self.assertEqual(pdb.public_symbols(self.path), pubs)
+            self.assertEqual(pdb.publics(self.path), {(1, 0x10): pubs[0][0]})
+
+    def test_a_changed_pdb_is_read_again_and_its_old_entry_removed(self):
+        self.assertEqual([f.name for f in pdb.functions(self.path)][-1], "`anonymous'::Helper")
+        self.path.write_bytes(build_pdb(twin=True))
+        self.assertIn("TScreen<int>::Construct", [f.name for f in pdb.functions(self.path)])
+        self.assertEqual(len(list(self.cache.iterdir())), 2)   # functions, public symbols: the old entries gone
+
+    def test_small_pdbs_and_the_repository_are_not_cached(self):
+        pdb.CACHE_MIN = 1 << 30
+        pdb.functions(self.path)
+        config.PDB_CACHE = config.ROOT / "pdb-cache"
+        pdb.CACHE_MIN = 0
+        pdb.functions(self.path)
+        self.assertEqual(list(self.cache.iterdir()), [])
+        self.assertFalse(config.PDB_CACHE.exists())
