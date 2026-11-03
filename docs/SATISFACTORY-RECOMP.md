@@ -427,7 +427,13 @@ What session B's recovery asked of the tools, by session A of batch "Finish":
 After batch "Finish", the PDB is read once: its functions, public symbols, type record offsets and class names
 are kept in `/Volumes/SMART/TheSTouch/pdb-cache` (`PORTKIT_PDB_CACHE`; 67 MB for FactoryGame, read again when the
 PDB or the reader changes). Warm, `--disasm` takes 1.1 s (3.8 s before), `--match` of a blob 0.9 s (3.3 s), and
-every `msvc match` and permuter candidate saves as much.
+every `msvc match` and permuter candidate saves as much. `--disasm` and `--by-line` take several names in one run
+(three functions 1.8 s instead of 3.7 s).
+
+The permuter reads the shipped module once and scores only its function (1.2 s -> 0.2 s a candidate), and compiles
+three candidates at once (`--jobs`), each from a worker folder searched first, the staged file never rewritten. On
+blob 107: one compile 24 s; two at once 25 s (12.5 s a candidate); three 29-41 s (10-13.5 s); four 62 s (the Mac has
+4 performance cores). From about 63 s a candidate on 2026-11-02 to about 12 s.
 
 Still to do: 3 (a decompiler draft), 4 (skeletons from the PDB), 5 (systematic differences fixed once) and 13 (stubs
 that log, with the native milestones).
