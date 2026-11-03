@@ -415,7 +415,7 @@ recovering:
 
 ### Done (2026-11-03, batch "Finish")
 
-What session B's recovery asked of the tools, by session A of batch "Finish":
+What session B's recovery asked of the tools, by session A of batch "Finish"; B-1 to B-5, what session B proposed at its end (B-3 and B-6 are in the recovered-code repository: Steamworks in the Build.cs, `lay()` in place.py):
 
 | # | Command | What it changed |
 |---|---|---|
@@ -423,6 +423,10 @@ What session B's recovery asked of the tools, by session A of batch "Finish":
 | A-2 | `./port decomp <dll> --disasm AFGGameState::PostLoadGame_Implementation` | a virtual overriding one of a base at a non-zero offset runs with `this` on that base; the PDB records it as the member function type's this adjustment (its `this` local is still typed as the class). The function's own `this` (not an inlinee's) then names members by their offset in the object, and the listing says once `; this is AFGGameState's IFGSaveInterface base (+0x328)`: `[r14 + 0x370]` reads `this->mBuildableLightColorSlots.ArrayNum` (it read a member 0x328 bytes too low), `[rcx - 0x58]` `this->PlayerArray.ArrayNum` (unnamed before) |
 | A-3 | `./port decomp <dll> --match <obj> --diff NAME` | `verdict: stack layout only (frame 0x188 vs 0x1c8)` when every differing instruction is the same but for its `[rsp/rbp + n]` and the frame's size: temporaries at other stack offsets (session B's `DeserializeGameModeSetting`, its two FVariant at `[rsp + 0x30]` / `[rsp + 0x48]`). After `stack slots only` (a one-to-one renaming), before `register allocation only` |
 | A-4 | `./port hooks <dll> --objects DIR --recovered FGGameState.cpp --out FILE` | nothing to change: slots already come from the PDB's public symbols, not the export table, so `UFGDownloadPlayerAvatarImageTask::DownloadAvatarImage` (not exported, rva 0x77fbd0) gets an `__imp_` slot or a thunk. Now tested; a name no PDB has is left to the linker, whose unresolved external names it (no stub) |
+| B-1 | `./port decomp <dll> --match <obj>` | a namespace's dynamic initializers and atexit destructors pair: the PDB writes `OnlineMessages::`dynamic initializer for 'Kicked''`, a class's static with the name inside; each spelling is tried. Session B's blob 107: 36 unpaired -> none, 36 more matched |
+| B-2 | `./port decomp <dll> --disasm NAME` | a call to code the linker folded names the folded function closest to the caller (words of the name, class, file, blob), then `folded with N: ...`: `UFGGameInstance::GetLocalNetworkVersion` calls `UFGPlatformFunctionsSubsystem::GetPlatformNetworkVersion`, one of 964 at that address (it read as a CRT stub) |
+| B-4 | `./port decomp <dll> --source F --out DIR` | lists F's functions in `functions.F.tsv`, the module-wide `functions.tsv` kept (it was overwritten); a rerun replaces its `.asm` files instead of adding `NAME@rva` copies |
+| B-5 | `./port decomp <dll> --source F` | also lists what is scoped in F's functions but compiled from elsewhere: a lambda passed as a TFunction (`TFunctionRefCaller<`UFGGameInstance::OnFocusChanged'::`5'::<lambda_1>,void>::Call`, source Function.h); FGGameInstance.cpp 83 -> 88 functions |
 
 After batch "Finish", the PDB is read once: its functions, public symbols, type record offsets and class names
 are kept in `/Volumes/SMART/TheSTouch/pdb-cache` (`PORTKIT_PDB_CACHE`; 67 MB for FactoryGame, read again when the
