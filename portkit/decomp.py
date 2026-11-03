@@ -56,6 +56,7 @@ class Module:
         self.names = {self.rva(s, o): n for (s, o), n in pdb.publics(self.pdb).items() if 0 < s <= len(self.image.sections)}
         self.names.update({self.rva(f.segment, f.offset): f.name for f in self.functions})
         self._types = self._details = self._symbols = None
+        self.paired = {}  # a compiled object's decorated name -> the RVA of the shipped function match paired it with
 
     @property
     def types(self):
@@ -74,13 +75,20 @@ class Module:
 
     def rva_of(self, symbol):
         """The RVA in the shipped module of what a compiled object's symbol names: an import's slot in the
-        import address table (__imp_X), else the public symbol's or the function's address; None if unknown."""
+        import address table (__imp_X), else the function `match` paired it with, the public symbol's or the
+        function's address, the function of that name (scoped_name, qualified_name) if only one; None if unknown."""
         if self._symbols is None:
             self._symbols = {f.mangled: self.rva(f.segment, f.offset) for f in self.functions if f.mangled}
             self._symbols.update({n: self.rva(s, o) for n, s, o, _ in pdb.public_symbols(self.pdb)
                                   if 0 < s <= len(self.image.sections)})
             self._symbols.update({"__imp_" + n.rpartition("!")[2]: rva for rva, n in self.image.iat.items()})
-        return self._symbols.get(symbol)
+            self._by_name = {}
+            for f in self.functions:
+                self._by_name.setdefault(f.name, []).append(self.rva(f.segment, f.offset))
+        if symbol in self.paired or symbol in self._symbols:
+            return self.paired.get(symbol, self._symbols.get(symbol))
+        rvas = set(self._by_name.get(scoped_name(symbol) or qualified_name(symbol) or "", ()))
+        return rvas.pop() if len(rvas) == 1 else None
 
     def function(self, name):
         for f in self.functions:
@@ -643,6 +651,7 @@ def match(dll, obj, diff=()):
             continue
         results.append(_compare(m, fn, shipped, how))
         pairs.append((results[-1], fn, shipped))
+        m.paired[fn.name] = m.rva(shipped.segment, shipped.offset)
     _align(m, [(r, fn, f) for r, fn, f in pairs if r.state == "differs" or r.name in diff or r.shipped in diff])
     return results
 
@@ -676,10 +685,10 @@ def _align(m, pairs):
             calls = ([(o, x[1], _shipped_call(m, f, t, o, n, len(blobs[2 * i]))) for (o, n, t), x
                       in zip(listings[2 * i], theirs)],
                      [(o, x[1], _our_call(m, fn, t, o, n)) for (o, n, t), x in zip(listings[2 * i + 1], ours)])
-            r.verdict = _verdict(m, f, calls, sm.get_opcodes(), rows)
+            r.verdict = _verdict(m, f, calls, rows)
 
 
-def _verdict(m, f, calls, opcodes, rows):
+def _verdict(m, f, calls, rows):
     """One line on what the differences of an aligned pair amount to: "registers only", "stack slots only"
     (the same instructions once renamed consistently); "register allocation only" (the same once copies,
     spills and nops are left out and registers masked); "inlined here, called there: X" or the reverse;
@@ -693,7 +702,7 @@ def _verdict(m, f, calls, opcodes, rows):
     if same:
         return "register allocation only"
     detail = m.details.detail(f) if f.module != 0xFFFF else None
-    if inlined := _inlined(theirs, ours, opcodes, detail.inlines if detail else ()):
+    if inlined := _inlined(theirs, ours, detail.inlines if detail else ()):
         return inlined
     if offset is None:
         first = next((i for i, (mark, *_) in enumerate(rows) if mark != "="), None)
@@ -823,25 +832,35 @@ def _allocated(text):
     return f"{mnemonic} {operands}"
 
 
-def _inlined(theirs, ours, opcodes, inlines=()):
+def _inlined(theirs, ours, inlines=()):
     """"inlined here, called there: X" where the shipped code (theirs) calls X and ours, which never calls X,
-    has as many instructions or more there and no call; "called here, inlined there: Y" where ours calls what
+    has code of its own there (calls aside, at least as many instructions; aligned with calls compared by
+    their callee, differing blocks at most two instructions apart taken as one); "called here, inlined there: Y" where ours calls what
     the shipped code never calls, and the shipped code has an inline site there (the PDB's), named Y. Lists of
     (offset, shown, call): call is (key, name) or None. The compiler's helpers (__security_check_cookie,
     _guard_dispatch_icall...) are never inlined: a call to one is no evidence. None when neither."""
-    called = ({c[0] for *_, c in theirs if c}, {c[0] for *_, c in ours if c})
+    called = [{x for *_, c in side if c for x in c if x} for side in (theirs, ours)]  # by key and by name
     theirs = [(o, t, c if c and not c[1].startswith(("__", "_guard")) else None) for o, t, c in theirs]
     ours = [(o, t, c if c and not c[1].startswith(("__", "_guard")) else None) for o, t, c in ours]
     here, there = [], []
-    for tag, i1, i2, j1, j2 in opcodes:
-        if tag == "equal":
-            continue
+    keys = [[(t, c and c[0]) for _, t, c in side] for side in (theirs, ours)]  # a call compares by its callee
+    clusters = []  # differing blocks, joined when at most two equal instructions part them
+    for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(None, *keys, autojunk=False).get_opcodes():
+        if tag != "equal":
+            if clusters and i1 - clusters[-1][1] <= 2:
+                clusters[-1][1], clusters[-1][3] = i2, j2
+            else:
+                clusters.append([i1, i2, j1, j2])
+    for i1, i2, j1, j2 in clusters:
         left, right = theirs[i1:i2], ours[j1:j2]
-        if right and len(right) >= len(left) and not any(c for *_, c in right):
-            here += [c[1] for *_, c in left if c and c[0] not in called[1]]
-        if left and len(left) >= len(right) and not any(c for *_, c in left):
-            site = _outermost(inlines, [o for o, *_ in left])
-            if site and any(c and c[0] not in called[0] for *_, c in right):
+        plain = sum(not c for *_, c in left), sum(not c for *_, c in right)  # instructions other than calls
+        unknown = any(c and isinstance(c[0], tuple) for *_, c in right)  # a symbol the module does not resolve
+        if plain[1] >= max(1, plain[0]) and not unknown:
+            here += [c[1] for *_, c in left if c and c[1] and c[0] not in called[1] and c[1] not in called[1]]
+        if plain[0] >= max(1, plain[1]):
+            site = _outermost(inlines, [o for o, _, c in left if not c])
+            if site and any(c and not isinstance(c[0], tuple) and c[0] not in called[0] and c[1] not in called[0]
+                            for *_, c in right):
                 there.append(site.name)
     out = []
     if here:
@@ -881,12 +900,14 @@ def _shipped_call(m, f, text, offset, length, size):
     start = m.rva(f.segment, f.offset)
     if hit.group(4):
         target = int(hit.group(4), 16)
+        target -= 1 << 64 if target >= 1 << 63 else 0  # a call backwards, from address 0
         if 0 <= target < size:
             return None
         rva = start + target
     else:
         rva = start + offset + length + (-1 if hit.group(2) == "-" else 1) * int(hit.group(3) or "0", 16)
-    return rva, _short(m.label(rva) or f"{rva:#x}")
+    label = m.label(rva)
+    return rva, _short(label) if label else None
 
 
 def _our_call(m, fn, text, offset, length):
@@ -905,7 +926,9 @@ def _our_call(m, fn, text, offset, length):
 def _short(name):
     """A callee's name for a verdict: an import without its DLL, a decorated name undecorated where it can be."""
     name = name.rpartition("!")[2].removeprefix("__imp_")
-    return (qualified_name(name) or scoped_name(name) or name) if name.startswith("?") else name
+    if not name.startswith("?"):
+        return name
+    return qualified_name(name) or scoped_name(name) or _undecorate(name[1:]) or name
 
 
 BRANCH = re.compile(r"^(j\w+|call|loop\w*) (0x[0-9a-f]+)$")

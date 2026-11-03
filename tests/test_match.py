@@ -300,24 +300,30 @@ class MatchTest(unittest.TestCase):
         self.assertEqual(decomp._allocation(theirs, ours), (False, 3, 1))
 
     def test_inlined_on_one_side_called_on_the_other(self):
-        import difflib
-        def ops(a, b):
-            return difflib.SequenceMatcher(None, [x[1] for x in a], [x[1] for x in b]).get_opcodes()
         get = (0x5000, "Widget::Get")
         theirs = [(0, "mov rcx, rbx", None), (3, "call <reloc>", get), (8, "test eax, eax", None)]
         ours = [(0, "mov rcx, rbx", None), (3, "mov eax, dword ptr [rcx + 0x8]", None), (6, "test eax, eax", None)]
-        self.assertEqual(decomp._inlined(theirs, ours, ops(theirs, ours)), "inlined here, called there: Widget::Get")
+        self.assertEqual(decomp._inlined(theirs, ours), "inlined here, called there: Widget::Get")
         # the other way round, when the PDB says what the shipped code has inline there
         site = pdb.InlineSite("Widget::Get", None, None, 0, [(3, 6, None, None)])
-        self.assertEqual(decomp._inlined(ours, theirs, ops(ours, theirs), [site]),
+        self.assertEqual(decomp._inlined(ours, theirs, [site]),
                          "called here, inlined there: Widget::Get")
-        self.assertIsNone(decomp._inlined(ours, theirs, ops(ours, theirs)))          # no evidence: nothing
+        self.assertIsNone(decomp._inlined(ours, theirs))          # no evidence: nothing
         cookie = [(0, "mov rcx, rbx", None), (3, "call <reloc>", (0x6000, "__security_check_cookie")),
                   (8, "test eax, eax", None)]
-        self.assertIsNone(decomp._inlined(cookie, ours, ops(cookie, ours)))       # a helper is never inlined
+        self.assertIsNone(decomp._inlined(cookie, ours))       # a helper is never inlined
+        # a call aligned with a call to something else: still what the shipped code calls
+        other = [(0, "mov rcx, rbx", None), (3, "call <reloc>", (0x7000, "Widget::Other")),
+                 (8, "mov eax, dword ptr [rcx + 0x8]", None), (0xb, "test eax, eax", None)]
+        self.assertEqual(decomp._inlined(theirs, other), "inlined here, called there: Widget::Get")
+        self.assertIsNone(decomp._inlined(theirs, other[:2] + other[3:]))   # another call in its place: no
+        local = [(0, "mov rcx, rbx", None), (3, "call <reloc>", (("symbol", "?Get@Widget@@"), "Widget::Get")),
+                 (8, "mov eax, dword ptr [rcx + 0x8]", None), (0xb, "test eax, eax", None)]
+        self.assertIsNone(decomp._inlined(theirs, local))   # called here too, under a symbol not resolved
+        self.assertEqual(decomp._short("__imp_??0FString@@QEAA@PEBD@Z"), "FString::FString")
         # a call ours makes too is not inlined
         moved = [(0, "call <reloc>", get), (5, "mov rcx, rbx", None), (8, "test eax, eax", None)]
-        self.assertIsNone(decomp._inlined(theirs, moved, ops(theirs, moved)))
+        self.assertIsNone(decomp._inlined(theirs, moved))
 
     def test_not_an_object_file(self):
         bad = self.dir / "x.obj"
