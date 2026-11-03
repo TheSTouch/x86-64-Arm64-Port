@@ -403,6 +403,56 @@ def callers(m, name):
     return out
 
 
+NOISE = re.compile(r"(TArray|FString::(Len|operator\*)|TSizedHeap|UE::Core|FMemory|TSet|TMapBase|TBitArray|TConstSetBit"
+                   r"|TSparse|ConstructItems|FGenericPlatform|DestructItems|TCString|FVariant::~|TDefault|GetTypeHash"
+                   r"|FCrc|__|_guard|memcpy|memmove|memset)")
+
+
+def by_line(m, f):
+    """Per line of the function's own source file, in address order, what the code of that line reaches:
+    [(line, ["call X", "vcall [rax + 0x88]", "inl Y", 'u"..."', "log ...", "global Z", "this->mFoo",
+    "cmp 0x20"])]. Code inlined from elsewhere counts for the line that inlined it; containers, memory and
+    compiler helpers are left out."""
+    if not f.source:
+        raise Fail(f"{f.name}: no line information")
+    own = re.compile(r";\s*" + re.escape(_base(f.source)) + r":(\d+)$")
+    out, line = [], None
+    for text in m.disassemble(f).splitlines()[4:]:
+        items = []
+        if hit := own.match(text):
+            line = int(hit.group(1))
+            continue
+        if hit := re.match(r";\s*> inlined (.+?)(?: \([^()]+:\d+\))?$", text):
+            if not NOISE.match(hit.group(1)):
+                items.append("inl " + hit.group(1))
+        elif hit := re.match(r"\s+\+[0-9a-f]{5}\s+(\S+)\t?([^;]*?)\s*(?:; (.*))?$", text):
+            mnemonic, operands, notes = hit.group(1), hit.group(2).strip(), (hit.group(3) or "").split("; ")
+            notes = [n for n in notes if n]
+            labelled = "rip" in operands or re.match(r"(call|jmp)\b", mnemonic) and operands.startswith("0x")
+            label = notes.pop(0) if labelled and notes else None
+            if mnemonic == "call" and label:
+                if not NOISE.match(_short(label)):
+                    items.append("call " + _short(label))
+            elif mnemonic == "call" and "ptr [r" in operands and "rip" not in operands:
+                items.append("vcall " + operands.split("ptr ", 1)[1])
+            elif label and label.startswith(('u"', '"')):
+                if ":\\" not in label:  # the file of a check: not the line's own
+                    items.append(label)
+            elif label and label.startswith("log "):
+                items.append(label)
+            elif label and mnemonic != "jmp" and not NOISE.match(_short(label)):
+                items.append("global " + _short(label))
+            items += notes  # what typed locals reach
+            if mnemonic in ("cmp", "test") and (imm := re.search(r", (0x[0-9a-f]+|\d+)$", operands)):
+                items.append("cmp " + imm.group(1))
+        if line is None:
+            continue
+        if not out or out[-1][0] != line:
+            out.append((line, []))
+        out[-1][1].extend(i for i in items if i not in out[-1][1])
+    return [(n, items) for n, items in out if items]
+
+
 def _is_game_source(path):
     p = path.replace("/", "\\").lower()
     return "\\source\\" in p and not any(x in p for x in ("\\engine\\", "\\intermediate\\", "\\thirdparty\\"))

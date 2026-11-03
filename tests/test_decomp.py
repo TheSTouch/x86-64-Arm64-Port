@@ -1,3 +1,4 @@
+import re
 import shutil
 import struct
 import tempfile
@@ -166,6 +167,19 @@ class DecompTest(unittest.TestCase):
         # an import: Construct calls ExitProcess through the import address table
         self.assertEqual([(f.name, kind, site, same) for f, kind, site, same in decomp.callers(m, "ExitProcess")],
                          [("FGScreen::Construct", "call", 0x1010, None)])
+
+    @unittest.skipUnless(shutil.which("objdump"), "needs objdump (Xcode command line tools)")
+    def test_by_line_of_the_functions_own_source(self):
+        data = bytearray(self.dll.read_bytes())
+        data[0x420:0x427] = bytes.fromhex("f6412b20") + b"\xc3\x90\x90"  # +0x10: test byte ptr [rcx + 0x2b], 0x20
+        self.dll.write_bytes(bytes(data))
+        m = decomp.Module(self.dll)
+        self.assertEqual(decomp.by_line(m, m.function("FGScreen::Construct")), [
+            (20, ["call ExitProcess", "inl Screen::Reset", 'u"Hello, loading"', "inl Detail::Clear"]),
+            (21, ["cmp 0x20"])])
+        self.assertEqual(re.match(r";\s*> inlined (.+?)(?: \([^()]+:\d+\))?$",
+                                  "; > inlined TFunction<void __cdecl(int)>::TFunction (Function.h:12)").group(1),
+                         "TFunction<void __cdecl(int)>::TFunction")
 
     def test_game_functions_select_by_source_folder(self):
         m = decomp.Module(self.dll)

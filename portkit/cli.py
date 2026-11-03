@@ -224,6 +224,11 @@ def cmd_decomp(a):
         print(f"{len(rows)} call sites in {len({r[0].name for r in rows})} functions, "
               f"{sum(bool(r[3]) for r in rows)} in the same unity blob", file=sys.stderr)
         return 0
+    if a.by_line:
+        f = m.function(a.by_line)
+        for line, items in decomp.by_line(m, f):
+            print(f"{decomp._base(f.source)}:{line}  " + " | ".join(items))
+        return 0
     if a.disasm:
         print(m.disassemble(m.function(a.disasm)), end="")
         return 0
@@ -457,6 +462,8 @@ def parser():
     sp.add_argument("--all", action="store_true", help="list every function, engine templates included")
     sp.add_argument("--disasm", metavar="NAME", help="disassemble one function (name or decorated name)")
     sp.add_argument("--type", metavar="NAME", help="a class, struct or enum: layout, members, vtable slots")
+    sp.add_argument("--by-line", metavar="NAME", help="per line of the function's own source file, in address order: "
+                    "the calls, inlined calls, strings, log records, globals, fields and compared constants")
     sp.add_argument("--callers", metavar="NAME", help="the functions of the module that call this one (or jump to it), "
                     "and whether each was compiled in the same unity blob")
     sp.add_argument("--out", metavar="DIR", help="write functions.tsv and one .asm per function (outside this repository)")
