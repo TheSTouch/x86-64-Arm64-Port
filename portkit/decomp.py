@@ -493,12 +493,117 @@ def qualified_name(decorated):
     return "::".join(reversed(parts))
 
 
+SPECIAL = {"?R": "operator()", "?_G": "`scalar deleting destructor'", "?_E": "`vector deleting destructor'"}
+
+
+def scoped_name(decorated):
+    """The PDB's name of a function MSVC decorates inside another function's scope (a lambda's member, a
+    local class's such as fgcheck's Impl) or of a dynamic initializer or atexit destructor:
+    "`AFGGameMode::RebootSession'::`2'::<lambda_1>::operator()",
+    "`dynamic initializer for 'AFGGameMode::MapOptionsToNeverSave''". None for anything else, and for what
+    this reader does not know (templates, anonymous namespaces)."""
+    for prefix, what in (("??__E", "dynamic initializer"), ("??__F", "dynamic atexit destructor")):
+        if decorated.startswith(prefix):
+            rest = decorated[len(prefix):]
+            name = _undecorate(rest[1:] if rest.startswith("?") else rest)
+            return f"`{what} for '{name}''" if name else None
+    name = _undecorate(decorated[1:]) if decorated.startswith("?") else None
+    return name if name and "`" in name else None
+
+
+def _undecorate(s, depth=0):
+    """The qualified name at the start of a decorated name (`s` without its leading '?'), or None."""
+    member = None
+    for code in ("?R", "?_G", "?_E", "?0", "?1"):
+        if s.startswith(code):
+            member, s = code, s[len(code):]
+            break
+    parts, memo = [], []
+    while s and s[0] != "@" and depth < 6:
+        if s[0].isdigit():  # a back reference to a name already read
+            if int(s[0]) >= len(memo):
+                return None
+            parts.append(memo[int(s[0])])
+            s = s[1:]
+        elif hit := re.match(r"\?(\d|[A-P]+@)\?", s):  # a scope of the function whose decorated name follows
+            outer = _undecorate(s[hit.end():][1:], depth + 1)
+            if outer is None:
+                return None
+            parts.append(f"`{outer}'::`{_number(hit.group(1))}'")
+            break
+        else:
+            name, sep, s = s.partition("@")
+            if not sep or not re.fullmatch(r"[\w<>]+", name):
+                return None  # a template, an anonymous namespace, a name this reader does not know
+            parts.append(name)
+            memo.append(name)
+    if not parts or s == "" and not parts[-1].startswith("`"):
+        return None
+    if s.startswith("@") and s[1:2] in tuple("GHOPWX$"):
+        return None  # an adjustor or vtordisp thunk: the PDB names it [thunk]:...
+    if member in ("?0", "?1"):
+        member = ("~" if member == "?1" else "") + parts[0]
+    else:
+        member = SPECIAL.get(member)
+    return "::".join(reversed(parts)) + (f"::{member}" if member else "")
+
+
+def _number(code):
+    """A decorated name's number: a digit for 1 to 10, else hexadecimal digits A-P (0-15) and '@'."""
+    if code.isdigit():
+        return int(code) + 1
+    return int("".join("0123456789abcdef"[ord(c) - ord("A")] for c in code[:-1]), 16)
+
+
+def pair_scoped(names, functions, compiland=None):
+    """{decorated name: shipped function} for compiled functions inside a function's scope, dynamic
+    initializers and deleting destructors: the shipped function of that PDB name when only one has it, or
+    only one compiled in `compiland` (the object's file name: a header's static has an initializer in every
+    unity blob); else, the scopes numbered differently, the Nth of its kind in its enclosing function
+    (lambda_N, the Nth Impl by scope), when both sides have as many and the order agrees with every pair of
+    the same name. Left out when unsure."""
+    scoped = {n: k for n in names if (k := scoped_name(n))}
+    by_name, groups = {}, {}
+    for f in functions:
+        if "`" in f.name:
+            by_name.setdefault(f.name, []).append(f)
+    if compiland:
+        for name, fs in by_name.items():
+            if len(fs) > 1 and len(here := [f for f in fs if _base(f.compiland) == compiland]) == 1:
+                by_name[name] = here
+    for name, fs in by_name.items():
+        if len(fs) == 1:
+            groups.setdefault(_unnumbered(name), [[], []])[1].append(fs[0])
+    out = {}
+    for n, k in scoped.items():
+        if len(by_name.get(k, ())) == 1:
+            out[n] = by_name[k][0]
+        groups.setdefault(_unnumbered(k), [[], []])[0].append(n)
+    for ours, theirs in groups.values():
+        if not ours or len(ours) != len(theirs):
+            continue
+        ours = sorted(ours, key=lambda n: _scopes(scoped[n]))
+        theirs = sorted(theirs, key=lambda f: _scopes(f.name))
+        if all(out.get(n, f) is f for n, f in zip(ours, theirs)):
+            out.update(zip(ours, theirs))
+    return out
+
+
+def _unnumbered(name):
+    return re.sub(r"`\d+'", "`#'", name)
+
+
+def _scopes(name):
+    return [int(x) for x in re.findall(r"`(\d+)'", name)]
+
+
 def match(dll, obj, diff=()):
     """Each function of a compiled COFF object against the shipped function of the same decorated name
-    (a public symbol), or else of the same qualified name when only one function has it. Bytes a
-    relocation fills are masked on both sides: the shipped code has the linker's values there. Differing
-    functions, and those named in `diff` (decorated or shipped name), are aligned instruction by instruction
-    (needs objdump): rows and score."""
+    (a public symbol), or else of the same qualified name when only one function has it, or else paired by
+    scope (pair_scoped: lambdas, local classes, dynamic initializers). Bytes a relocation fills are masked
+    on both sides: the shipped code has the linker's values there. Differing functions, and those named in
+    `diff` (decorated or shipped name), are aligned instruction by instruction (needs objdump): rows and
+    score."""
     try:
         o = coff.parse(Path(obj).read_bytes())
     except coff.NotCOFF as e:
@@ -508,13 +613,17 @@ def match(dll, obj, diff=()):
     by_name = {}
     for f in m.functions:
         by_name.setdefault(f.name, []).append(f)
+    functions = o.functions()
+    scoped = pair_scoped([fn.name for fn in functions if fn.name not in by_mangled], m.functions, Path(obj).name)
     results, pairs = [], []
-    for fn in o.functions():
+    for fn in functions:
         shipped, how = by_mangled.get(fn.name), ""
         if shipped is None:
             candidates = by_name.get(qualified_name(fn.name), [])
             if len(candidates) == 1:
                 shipped, how = candidates[0], "by name"
+        if shipped is None and fn.name in scoped:
+            shipped, how = scoped[fn.name], "by scope"
         if shipped is None:
             results.append(Match(fn.name, "missing", detail="no function of that name in the shipped module"))
             continue

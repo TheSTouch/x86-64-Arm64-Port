@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from portkit import coff, decomp
+from portkit import coff, decomp, pdb
 from portkit.util import Fail
 from tests.test_decomp import build_dll
 from tests.test_pdb import build_pdb
@@ -201,6 +201,55 @@ class MatchTest(unittest.TestCase):
                          "CreateBrushFromPng")
         self.assertIsNone(decomp.qualified_name("??0FName@@QEAA@PEB_WW4EFindName@@@Z"))   # operators, constructors
         self.assertIsNone(decomp.qualified_name("main"))
+
+    def test_names_inside_a_function_scope(self):
+        self.assertEqual(decomp.scoped_name("??R<lambda_1>@?1??Load@FGScreen@@QEAAXXZ@QEBA@H@Z"),
+                         "`FGScreen::Load'::`2'::<lambda_1>::operator()")
+        self.assertEqual(decomp.scoped_name("?ExecCheckImplInternal@Impl@?5??Save@FGScreen@@QEAAXH@Z@SAXXZ"),
+                         "`FGScreen::Save'::`6'::Impl::ExecCheckImplInternal")
+        self.assertEqual(decomp.scoped_name("??R<lambda_1>@?9???R<lambda_2>@?1??Load@FGScreen@@QEAAXXZ@QEBA@H@Z@QEBAXXZ"),
+                         "``FGScreen::Load'::`2'::<lambda_2>::operator()'::`10'::<lambda_1>::operator()")
+        self.assertEqual(decomp.scoped_name("?Run@Impl@?BA@??Save@FGScreen@@QEAAXH@Z@SAXXZ"),
+                         "`FGScreen::Save'::`16'::Impl::Run")
+        self.assertEqual(decomp.scoped_name("??1<lambda_3>@?1??Load@FGScreen@@QEAAXXZ@QEAA@XZ"),
+                         "`FGScreen::Load'::`2'::<lambda_3>::~<lambda_3>")
+        self.assertEqual(decomp.scoped_name("??__E?sNames@FGScreen@@2V?$TArray@H@@A@@YAXXZ"),
+                         "`dynamic initializer for 'FGScreen::sNames''")
+        self.assertEqual(decomp.scoped_name("??__EGScreens@@YAXXZ"), "`dynamic initializer for 'GScreens''")
+        self.assertEqual(decomp.scoped_name("??__F?sNames@FGScreen@@2V?$TArray@H@@A@@YAXXZ"),
+                         "`dynamic atexit destructor for 'FGScreen::sNames''")
+        self.assertEqual(decomp.scoped_name("??_EFGScreen@@UEAAPEAXI@Z"), "FGScreen::`vector deleting destructor'")
+        self.assertIsNone(decomp.scoped_name("??_EFGScreen@@WBA@EAAPEAXI@Z"))     # its adjustor thunk
+        self.assertIsNone(decomp.scoped_name(CONSTRUCT))                          # no scope: the other rules
+        self.assertIsNone(decomp.scoped_name("?Helper@?A0x1b2c3d4e@@YAXXZ"))      # an anonymous namespace
+        self.assertIsNone(decomp.scoped_name("??$Get@H@?1??Load@FGScreen@@QEAAXXZ@QEAAXXZ"))  # a template
+
+    def test_pairs_by_scope_when_unsure_not_at_all(self):
+        def fn(name, offset):
+            return pdb.Function(name, 1, offset, 8, "Module.Game.1.cpp.obj")
+        shipped = [fn("`FGScreen::Load'::`2'::<lambda_1>::operator()", 0x10),
+                   fn("`FGScreen::Load'::`3'::<lambda_2>::operator()", 0x20),
+                   fn("`FGScreen::Save'::`6'::Impl::ExecCheckImplInternal", 0x30),
+                   fn("`FGScreen::Save'::`9'::Impl::ExecCheckImplInternal", 0x40),
+                   fn("`dynamic initializer for 'FGScreen::sNames''", 0x50),
+                   fn("`FGScreen::Draw'::`2'::Impl::ExecCheckImplInternal", 0x60),
+                   fn("`FGScreen::Draw'::`5'::Impl::ExecCheckImplInternal", 0x70)]
+        names = ["??R<lambda_1>@?1??Load@FGScreen@@QEAAXXZ@QEBA@H@Z",          # the same name
+                 "??R<lambda_2>@?4??Load@FGScreen@@QEAAXXZ@QEBA@H@Z",          # scope 5 there, 3 here: lambda_2
+                 "?ExecCheckImplInternal@Impl@?6??Save@FGScreen@@QEAAXH@Z@SAXXZ",   # scopes 7 and 11: 1st, 2nd
+                 "?ExecCheckImplInternal@Impl@?L@??Save@FGScreen@@QEAAXH@Z@SAXXZ",
+                 "??__E?sNames@FGScreen@@2V?$TArray@H@@A@@YAXXZ",
+                 "?ExecCheckImplInternal@Impl@?2??Draw@FGScreen@@QEAAXXZ@SAXXZ",    # one of two: which one?
+                 "??R<lambda_3>@?1??Load@FGScreen@@QEAAXXZ@QEBA@H@Z"]           # none shipped
+        pairs = decomp.pair_scoped(names, shipped)
+        self.assertEqual({n: f.offset for n, f in pairs.items()},
+                         {names[0]: 0x10, names[1]: 0x20, names[2]: 0x30, names[3]: 0x40, names[4]: 0x50})
+        # a header's static: an initializer in every unity blob, the object's own blob decides
+        shipped = [fn("`dynamic initializer for 'GScreens''", 0x10), fn("`dynamic initializer for 'GScreens''", 0x20)]
+        shipped[1].compiland = "D:\\Game\\Intermediate\\Module.Game.2.cpp.obj"
+        self.assertEqual(decomp.pair_scoped(["??__EGScreens@@YAXXZ"], shipped), {})
+        pairs = decomp.pair_scoped(["??__EGScreens@@YAXXZ"], shipped, "Module.Game.2.cpp.obj")
+        self.assertEqual(pairs["??__EGScreens@@YAXXZ"].offset, 0x20)
 
     def test_not_an_object_file(self):
         bad = self.dir / "x.obj"
