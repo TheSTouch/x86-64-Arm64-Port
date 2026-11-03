@@ -9,7 +9,9 @@ the object `emit` writes:
 - a pointer slot per symbol the recovered code takes from a project module (the hooked module itself and the
   game's plugins, which have no import library): `__imp_<name>` for what the headers declare with the
   module's _API macro, or a jump thunk named after a function referenced directly. The loader fills each
-  slot with the module's base plus the RVA the PDB gives, once that module is mapped;
+  slot with the module's base plus the RVA the PDB gives, once that module is mapped. The RVAs come from the
+  PDB's public symbols, not the export table: a function the module does not export is reached all the same.
+  A decorated name no module's PDB has gets no slot (and no stub): the linker reports it unresolved;
 - with `trace`, every function of the hooked module, for the loader's trace mode (first execution of each).
 
 Engine modules are left to their import libraries. Only symbols and RVAs come from the game here; the

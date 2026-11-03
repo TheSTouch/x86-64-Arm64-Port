@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from portkit import coff, hooks, pdb
+from portkit import coff, hooks, pdb, pe
 from portkit.util import Fail
 from tests.test_decomp import build_dll
 from tests.test_pdb import build_pdb
@@ -162,6 +162,23 @@ class PublicSymbolsTest(unittest.TestCase):
             self.assertEqual(m.symbols[CONSTRUCT], (0x1010, True))
             self.assertEqual(m.functions[CONSTRUCT][:2], (0x1010, 0x40))
             self.assertEqual(len(m.bytes_at(0x1010, 8)), 8)
+
+    def test_functions_the_module_does_not_export_get_slots_from_the_pdb(self):
+        # slots come from the PDB's public symbols, not the export table: a function FactoryGame does not
+        # export (UFGDownloadPlayerAvatarImageTask::DownloadAvatarImage) is reached all the same, through
+        # __imp_ or called directly. A decorated name neither has gets no slot and no stub: it is left to the
+        # linker, whose unresolved external names it
+        with tempfile.TemporaryDirectory() as d:
+            dll = Path(d) / "Game-Screen-Win64-Shipping.dll"
+            dll.write_bytes(build_dll())
+            dll.with_suffix(".pdb").write_bytes(build_pdb())
+            self.assertEqual(pe.parse(dll).export_names, [])                      # exports nothing
+            missing = "?Nowhere@FGScreen@@QEAAXXZ"
+            o = coff.parse(obj(defined=["?Caller@@YAXXZ"], undefined=["__imp_" + CONSTRUCT, CONSTRUCT, missing]))
+            p = hooks.plan([o], [], [hooks.Shipped(dll)])
+            self.assertEqual(sorted((s.symbol, s.rva, s.thunk) for s in p.slots),
+                             [(CONSTRUCT, 0x1010, True), ("__imp_" + CONSTRUCT, 0x1010, False)])
+            self.assertEqual((p.left, p.errors), ([missing], []))
 
     def test_missing_pdb(self):
         with tempfile.TemporaryDirectory() as d:
