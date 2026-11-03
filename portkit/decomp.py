@@ -862,7 +862,8 @@ def _callees(rows, calls):
 
 def _verdict(m, f, calls, rows):
     """One line on what the differences of an aligned pair amount to: "registers only", "stack slots only"
-    (the same instructions once renamed consistently); "register allocation only" (the same once copies,
+    (the same instructions once renamed consistently); "stack layout only (frame 0x188 vs 0x1c8)" (the same
+    instructions, temporaries at other stack offsets); "register allocation only" (the same once copies,
     spills and nops are left out and registers masked); "inlined here, called there: X" or the reverse;
     else the first differing source line, the first difference register allocation does not explain, and
     how many instructions it does not explain. "" when unsure. calls: per side [(offset, shown, call)]."""
@@ -870,6 +871,8 @@ def _verdict(m, f, calls, rows):
     plain = [x[:2] for x in theirs], [x[:2] for x in ours]
     if renamed := _renamed(*plain):
         return renamed
+    if layout := _stack_layout(rows):
+        return layout
     same, offset, others = _allocation(*plain)
     if same:
         return "register allocation only"
@@ -963,6 +966,32 @@ def _bind(pair, u, v):
     if forward.setdefault(u, v) != v or back.setdefault(v, u) != u:
         return False
     return True
+
+
+FRAME = re.compile(r"^(sub|add) rsp, (0x[0-9a-f]+|\d+)$")
+
+
+def _stack_layout(rows):
+    """"stack layout only (frame 0x188 vs 0x1c8)" when every differing row of an alignment pairs the same
+    instruction once the displacements of [rsp + n] / [rbp + n] and the size of sub rsp / add rsp are left
+    out: temporaries at other stack offsets, maybe in a frame of another size (the first sub rsp of each
+    side; "(frame 0x188)" when the same, nothing when neither has one). None otherwise."""
+    pairs = [(left, right) for mark, left, right in rows if mark != "="]
+    if not pairs or any(left is None or right is None or _unstacked(left[1]) != _unstacked(right[1])
+                        for left, right in pairs):
+        return None
+    frames = [next((int(hit.group(2), 0) for x in side if x and (hit := FRAME.match(x[1]))
+                    and hit.group(1) == "sub"), None) for side in ([r[1] for r in rows], [r[2] for r in rows])]
+    if None in frames:
+        return "stack layout only"
+    return "stack layout only (frame " + (f"{frames[0]:#x})" if frames[0] == frames[1] else
+                                          f"{frames[0]:#x} vs {frames[1]:#x})")
+
+
+def _unstacked(text):
+    if hit := FRAME.match(text):
+        return f"{hit.group(1)} rsp, #"
+    return re.sub(r"\[(rsp|rbp)(?: [+-] 0x[0-9a-f]+)?\]", r"[\1 + #]", text)
 
 
 MOVES = {"mov", "movaps", "movups", "movapd", "movupd", "movsd", "movss", "movq", "movd", "movdqa", "movdqu"}

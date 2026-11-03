@@ -322,6 +322,35 @@ class MatchTest(unittest.TestCase):
         ours[1] = (5, "mov eax, dword ptr [rcx + 0xc]")      # another field: a difference of its own
         self.assertEqual(decomp._allocation(theirs, ours), (False, 3, 1))
 
+    def test_stack_layout_only(self):
+        def aligned(theirs, ours):
+            at = [4 * i for i in range(len(theirs))]
+            rows = [("=" if a == b else "!", (o, a), (o, b)) for o, a, b in zip(at, theirs, ours)]
+            return ([(o, a, None) for o, a in zip(at, theirs)], [(o, b, None) for o, b in zip(at, ours)]), rows
+        # two temporaries elsewhere in a bigger frame, and the frame's size
+        theirs = ["sub rsp, 0x188", "lea rcx, [rsp + 0x30]", "mov qword ptr [rsp + 0x30], rax",
+                  "lea rdx, [rsp + 0x48]", "call <reloc>", "add rsp, 0x188", "ret"]
+        ours = ["sub rsp, 0x1c8", "lea rcx, [rsp + 0x48]", "mov qword ptr [rsp + 0x48], rax",
+                "lea rdx, [rsp + 0x30]", "call <reloc>", "add rsp, 0x1c8", "ret"]
+        calls, rows = aligned(theirs, ours)
+        self.assertEqual(decomp._stack_layout(rows), "stack layout only (frame 0x188 vs 0x1c8)")
+        self.assertEqual(decomp._verdict(None, None, calls, rows), "stack layout only (frame 0x188 vs 0x1c8)")
+        # the same frame, slots not renamed one to one (two temporaries there, one here)
+        calls, rows = aligned(["sub rsp, 0x188", "lea rcx, [rsp + 0x30]", "mov dword ptr [rsp + 0x48], 0x0",
+                               "call <reloc>", "add rsp, 0x188", "ret"],
+                              ["sub rsp, 0x188", "lea rcx, [rsp + 0x30]", "mov dword ptr [rsp + 0x30], 0x0",
+                               "call <reloc>", "add rsp, 0x188", "ret"])
+        self.assertIsNone(decomp._renamed(*[[x[:2] for x in side] for side in calls]))
+        self.assertTrue(decomp._allocation(*[[x[:2] for x in side] for side in calls])[0])  # it says so too: after
+        self.assertEqual(decomp._verdict(None, None, calls, rows), "stack layout only (frame 0x188)")
+        # a register besides: not the stack's layout alone
+        ours = theirs[:1] + ["lea r8, [rsp + 0x48]"] + theirs[2:]
+        self.assertIsNone(decomp._stack_layout(aligned(theirs, ours)[1]))
+        # an instruction one side lacks: neither
+        rows = aligned(theirs, theirs)[1]
+        self.assertIsNone(decomp._stack_layout(rows[:1] + [("<", (4, "nop"), None)] + rows[1:]))
+        self.assertIsNone(decomp._stack_layout(rows))   # nothing differs
+
     def test_inlined_on_one_side_called_on_the_other(self):
         get = (0x5000, "Widget::Get")
         theirs = [(0, "mov rcx, rbx", None), (3, "call <reloc>", get), (8, "test eax, eax", None)]
