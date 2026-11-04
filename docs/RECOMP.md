@@ -3,7 +3,8 @@
 A game's recompilation is planned after its Porting Kit phase, from what that phase measured. This
 page lists what goes in, what each source gives, and the decisions the plan has to make.
 
-Plans so far: [Satisfactory](SATISFACTORY-RECOMP.md).
+Plans so far: [Satisfactory](SATISFACTORY-RECOMP.md). Which other games its matching decompilation can work on,
+and the planned check and setup commands: [DECOMP-ANY-GAME.md](DECOMP-ANY-GAME.md).
 
 ## Why recompile at all
 

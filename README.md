@@ -17,11 +17,27 @@ There are two routes, and each game uses the best one it has:
 
 | Game | Porting Kit | Native recompilation |
 |---|---|---|
-| Satisfactory (Steam, Unreal Engine 5.6) | `wine11`, Vulkan on MoltenVK 1.4.2: reaches the main menu; the menu's 3D scene does not render correctly yet, and some runs stop on a GPU timeout. Details: [docs/SATISFACTORY.md](docs/SATISFACTORY.md) | Go: no protection, no anti-cheat, every PDB shipped. Plan: Coffee Stain's engine built natively, the game's own code recovered as C++; first milestone, the early loading screen ([docs/SATISFACTORY-RECOMP.md](docs/SATISFACTORY-RECOMP.md)) |
+| Satisfactory (Steam, Unreal Engine 5.6) | `wine11`, Vulkan on MoltenVK 1.4.2: reaches the main menu; the menu's 3D scene does not render correctly yet, and some runs stop on a GPU timeout. Details: [docs/SATISFACTORY.md](docs/SATISFACTORY.md) | Go: no protection, no anti-cheat, every PDB shipped. The game's own code recovered as C++ that matches the shipped bytes, proved in the shipped game on Windows by a hook loader; milestone in progress: the main menu and every menu screen on recovered code ([docs/SATISFACTORY-RECOMP.md](docs/SATISFACTORY-RECOMP.md)) |
 | STAR WARS: Galactic Racer (Steam, 2026) | Waiting for a Steam copy of the game | To plan after the benchmark ([docs/RECOMP.md](docs/RECOMP.md)) |
 
 Each game has a file in [games/](games/). Fields left empty are filled from the Steam library once
 the game is installed there.
+
+### Which games the matching decompilation can work on
+
+Recovering a game's code as matching C++ (the Satisfactory route) needs things few commercial games have:
+
+- **the PDBs of the shipped build**, matching its binaries: without names, source files and line numbers there is
+  nothing to work from, and almost no game ships them;
+- **no code protection and no anti-cheat** that stops a modified single-player game: this project never
+  circumvents a protection;
+- **the engine's source** at or near the shipped version, and **the exact compiler** the game was built with;
+- **a copy you own**, and a Windows PC to prove recovered code in the running game.
+
+The tools are public; the recovered code is not. It is derived from the game, so it stays on your own disks and is
+never pushed to a public host. Checking a game against these requirements and setting up its private workspace
+with one command (`./port check`, `./port init`, an agent guide for AI sessions) is planned:
+[docs/DECOMP-ANY-GAME.md](docs/DECOMP-ANY-GAME.md).
 
 ## Requirements
 
