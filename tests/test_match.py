@@ -266,6 +266,9 @@ class MatchTest(unittest.TestCase):
                          "`FGScreen::Save'::`6'::Impl::ExecCheckImplInternal")
         self.assertEqual(decomp.scoped_name("??R<lambda_1>@?9???R<lambda_2>@?1??Load@FGScreen@@QEAAXXZ@QEBA@H@Z@QEBAXXZ"),
                          "``FGScreen::Load'::`2'::<lambda_2>::operator()'::`10'::<lambda_1>::operator()")
+        # the enclosing lambda has the same name: a back reference to the name already read outside
+        self.assertEqual(decomp.scoped_name("??R<lambda_1>@?DF@???R0?1??Update@FGScreen@@QEAAXM@Z@QEBA@H@Z@QEBAXH@Z"),
+                         "``FGScreen::Update'::`2'::<lambda_1>::operator()'::`53'::<lambda_1>::operator()")
         self.assertEqual(decomp.scoped_name("?Run@Impl@?BA@??Save@FGScreen@@QEAAXH@Z@SAXXZ"),
                          "`FGScreen::Save'::`16'::Impl::Run")
         self.assertEqual(decomp.scoped_name("??1<lambda_3>@?1??Load@FGScreen@@QEAAXXZ@QEAA@XZ"),

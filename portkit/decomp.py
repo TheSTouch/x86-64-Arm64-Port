@@ -735,14 +735,16 @@ def scoped_name(decorated):
     return name if name and "`" in name else None
 
 
-def _undecorate(s, depth=0):
-    """The qualified name at the start of a decorated name (`s` without its leading '?'), or None."""
+def _undecorate(s, depth=0, memo=None):
+    """The qualified name at the start of a decorated name (`s` without its leading '?'), or None. memo: the
+    names read so far, which a back reference counts from; an enclosing function's name shares the outer one's
+    (a lambda in a lambda of the same name: "??R<lambda_1>@?DF@???R0?1??Update@...")."""
     member = None
     for code in ("?R", "?_G", "?_E", "?0", "?1"):
         if s.startswith(code):
             member, s = code, s[len(code):]
             break
-    parts, memo = [], []
+    parts, memo = [], [] if memo is None else memo
     while s and s[0] != "@" and depth < 6:
         if s[0].isdigit():  # a back reference to a name already read
             if int(s[0]) >= len(memo):
@@ -750,7 +752,7 @@ def _undecorate(s, depth=0):
             parts.append(memo[int(s[0])])
             s = s[1:]
         elif hit := re.match(r"\?(\d|[A-P]+@)\?", s):  # a scope of the function whose decorated name follows
-            outer = _undecorate(s[hit.end():][1:], depth + 1)
+            outer = _undecorate(s[hit.end():][1:], depth + 1, memo)
             if outer is None:
                 return None
             parts.append(f"`{outer}'::`{_number(hit.group(1))}'")
