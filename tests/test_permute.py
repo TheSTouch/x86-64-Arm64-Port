@@ -167,6 +167,37 @@ class ParallelTest(unittest.TestCase):
             self.assertTrue(all(Path(tmp) / "builds" in f.parents for f in folders))
             self.assertEqual(seen[0], (None, SOURCE))                 # the start: the staged file as it is
 
+    def test_files_left_by_an_earlier_run_are_cleared(self):
+        # a worker's src/ is searched before the staged sources: a copy left there by a run on another file of
+        # the same blob would stand in for the staged one and break every candidate
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "Project"
+            path = project / "Source" / "FactoryGameRecomp-Recovered" / "FGFoo.cpp"
+            path.parent.mkdir(parents=True)
+            path.write_text(SOURCE)
+            stale = Path(tmp) / "builds" / "permute" / "Project" / "worker0" / "src" / "FGOther.cpp"
+            stale.parent.mkdir(parents=True)
+            stale.write_text("#error stale")
+            listed = []
+
+            def score_once(project_, blob, function, out_dir, shipped=None, include_first=None):
+                if include_first:
+                    listed.append(sorted(p.name for p in include_first.iterdir()))
+                return 5, 1.0
+
+            saved = config.MSVC_BUILDS
+            config.MSVC_BUILDS = Path(tmp) / "builds"
+            try:
+                with mock.patch.object(permute, "score_once", side_effect=score_once), \
+                        mock.patch.object(permute.msvc, "blob_name", return_value="Module.FactoryGame.1.cpp"), \
+                        mock.patch.object(permute.msvc, "pch_of", return_value=None), \
+                        mock.patch.object(permute.decomp, "Module"):
+                    permute.permute(project, "FGFoo.cpp", "UFoo::Tick", tries=2, seed=1, jobs=1, log=lambda m: None)
+            finally:
+                config.MSVC_BUILDS = saved
+            self.assertTrue(listed)
+            self.assertTrue(all(names == ["FGFoo.cpp"] for names in listed))
+
 
 class GuardTest(unittest.TestCase):
     def test_never_in_the_recovered_code_repository(self):

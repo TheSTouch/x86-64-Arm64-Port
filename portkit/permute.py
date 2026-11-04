@@ -13,6 +13,7 @@ simply scores nothing.
 import concurrent.futures
 import random
 import re
+import shutil
 import threading
 import time
 from dataclasses import dataclass, field
@@ -464,6 +465,8 @@ def permute(project, file_name, function, tries=100, minutes=60, seed=None, keep
     base = original[start:end]
     out_dir = config.MSVC_BUILDS / "permute" / project.name
     workers = [out_dir / f"worker{k}" for k in range(max(1, jobs))]   # each: its objects, and src/ first
+    for worker in workers:   # src/ is searched first: a copy an earlier run left there would replace a staged file
+        shutil.rmtree(worker / "src", ignore_errors=True)
     rng = random.Random(seed)
     deadline = time.monotonic() + 60 * minutes
     beside = path.parent / f"{path.name}.permute"

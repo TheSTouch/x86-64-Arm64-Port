@@ -437,7 +437,9 @@ every `msvc match` and permuter candidate saves as much. `--disasm` and `--by-li
 The permuter reads the shipped module once and scores only its function (1.2 s -> 0.2 s a candidate), and compiles
 three candidates at once (`--jobs`), each from a worker folder searched first, the staged file never rewritten. On
 blob 107: one compile 24 s; two at once 25 s (12.5 s a candidate); three 29-41 s (10-13.5 s); four 62 s (the Mac has
-4 performance cores). From about 63 s a candidate on 2026-11-02 to about 12 s.
+4 performance cores). From about 63 s a candidate on 2026-11-02 to about 12 s. Each run empties its workers' folders
+first: until 2026-11-04 a copy an earlier run had left there, of another file of the same blob, stood in for the
+staged one and broke every candidate, so those runs found nothing.
 
 Still to do: 3 (a decompiler draft), 4 (skeletons from the PDB), 5 (systematic differences fixed once) and 13 (stubs
 that log, with the native milestones).
