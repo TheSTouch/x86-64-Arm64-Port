@@ -204,10 +204,10 @@ def cmd_decomp(a):
                 print(decomp.diff_listing(r))
             if not a.diff or r.name in a.diff or r.shipped in a.diff:
                 print(decomp.match_line(r))
-        counts = {s: sum(r.state == s for r in results) for s in ("matched", "differs", "missing")}
-        print(f"{len(results)} functions: {counts['matched']} matched, {counts['differs']} differing, "
-              f"{counts['missing']} not in the shipped module", file=sys.stderr)
-        return 1 if counts["differs"] else 0
+        counts = {s: sum(r.state == s for r in results) for s in ("matched", "equivalent", "differs", "missing")}
+        print(f"{len(results)} functions: {counts['matched']} matched, {counts['equivalent']} equivalent, "
+              f"{counts['differs']} differing, {counts['missing']} not in the shipped module", file=sys.stderr)
+        return 1 if counts["differs"] or counts["equivalent"] else 0
     if a.out:
         root, fns = decomp.dump(a.dll, a.out, a.source)
         print(f"{len(fns)} functions ({sum(f.length for f in fns)} bytes) written to {root}")
@@ -382,7 +382,7 @@ def cmd_msvc(a):
                     continue
                 shipped = f"  [{r.shipped}]" if r.shipped else ""
                 print(f"{r.state:<8} {r.name}{shipped}" + (f": {r.detail}" if r.detail else ""))
-                differs += r.state == "differs"
+                differs += r.state in ("differs", "equivalent")   # equivalent is not matched
         return 1 if failed or differs else 0
     return 0
 

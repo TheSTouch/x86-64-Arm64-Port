@@ -673,7 +673,7 @@ def _groups(items, near=True):
 @dataclass
 class Match:
     name: str            # the object file's (decorated) name
-    state: str           # matched, differs, missing
+    state: str           # matched, equivalent (the same up to a renaming: _equivalent), differs, missing
     shipped: str = ""    # the shipped function's name, from the PDB
     length: int = 0
     offset: int = None   # the first difference
@@ -914,6 +914,8 @@ def _align(m, pairs):
             r.score = 1  # bytes differ where the text does not (another encoding of the same instruction)
         if r.state == "differs":
             r.verdict = _verdict(m, f, calls, rows)
+            if kind := _equivalent(*calls):
+                r.state, r.detail = "equivalent", f"({kind}), {r.detail}"
 
 
 def _callees(rows, calls):
@@ -1032,6 +1034,250 @@ def _bind(pair, u, v):
     if forward.setdefault(u, v) != v or back.setdefault(v, u) != u:
         return False
     return True
+
+
+# "equivalent", a status of --match next to matched and differs: stricter than _renamed's verdict, so that
+# "the same once renamed" means the same function under the Windows x64 calling convention.
+PINNED = {"a", "c", "d", "r8", "r9", "sp"} | {f"v{n}" for n in range(6)}   # arguments, results, the stack
+VOLATILE = {"a", "c", "d", "r8", "r9", "r10", "r11"} | {f"v{n}" for n in (*range(6), *range(16, 32))}
+HIDDEN = {"cpuid": {"b"}, "cmpxchg8b": {"b"}, "cmpxchg16b": {"b"}, "xlat": {"b"}, "xlatb": {"b"},
+          "enter": {"bp"}, "leave": {"bp"}}   # registers they use without naming them (rax..rdx are pinned)
+STRING_OP = re.compile(r"^(?:rep\w* )?(?:movs|stos|lods|scas|cmps|ins|outs)[bwdq]?\b")
+REGISTER = f"\\b(?:{'|'.join(sorted(FAMILY, key=len, reverse=True))})\\b"
+OPERANDS = {bases: re.compile(f"(?P<m>(?:(\\w+) ptr )?\\[({bases})(?: ([+-]) (0x[0-9a-f]+))?\\])|(?P<r>{REGISTER})")
+            for bases in ("rsp", "rsp|rbp")}
+REGISTER_ONLY = re.compile(f"(?P<r>{REGISTER})")
+SIZES = {"byte": 1, "word": 2, "dword": 4, "fword": 6, "qword": 8, "tbyte": 10, "xmmword": 16, "ymmword": 32,
+         "zmmword": 64}
+STORES = {"mov", "movaps", "movups", "movapd", "movupd", "movdqa", "movdqu", "movss", "movsd", "movq", "movd"}
+TARGET = re.compile(r"^(j\w+|call|loop\w*) #(\d+|\?)$")
+DISPLACEMENT = r"(?: ([+-]) (0x[0-9a-f]+))?\]"
+FRAME_FORMS = (("sub", re.compile(r"sub rsp, (0x[0-9a-f]+|\d+)")), ("add", re.compile(r"add rsp, (0x[0-9a-f]+|\d+)")),
+               ("fp", re.compile(r"lea rbp, \[rsp" + DISPLACEMENT)), ("unfp", re.compile(r"lea rsp, \[rbp" + DISPLACEMENT)))
+
+
+def _signed(sign, number):
+    return (-1 if sign == "-" else 1) * int(number or "0", 16)
+
+
+def _frame_form(text):
+    """(kind, n) for an instruction that sets the frame up or down (sub rsp, n; add rsp, n; lea rbp, [rsp + n];
+    lea rsp, [rbp + n]), whose n may differ between two layouts of one frame; None otherwise."""
+    for kind, form in FRAME_FORMS:
+        if hit := form.fullmatch(text):
+            return kind, int(hit.group(1), 0) if kind in ("sub", "add") else _signed(*hit.groups())
+    return None
+
+
+def _frame(texts):
+    """(depth, fp) of a listing whose local branches name the index they reach (_indexed): rsp before each
+    instruction relative to the entry's (0: the return address at [rsp]; None where never reached), and rbp's
+    when it is a frame pointer (lea rbp, [rsp + n] or mov rbp, rsp; else None). Followed along the branches,
+    a jump table's cases at the depth of its jump. None when the stack pointer changes in another way, or a
+    place is reached at two depths."""
+    n, depth, fp, tables = len(texts), [None] * len(texts), None, []
+    rbp_written = False
+
+    def walk(start, x):
+        nonlocal fp, rbp_written
+        work = [(start, x)]
+        while work:
+            i, x = work.pop()
+            while i < n:
+                if depth[i] is not None:
+                    if depth[i] != x:
+                        return False
+                    break
+                depth[i] = x
+                t = texts[i]
+                mnemonic, _, operands = t.partition(" ")
+                form = _frame_form(t)
+                if mnemonic == "push":
+                    x -= 8
+                elif mnemonic == "pop":
+                    if operands in ("rsp", "esp"):
+                        return False
+                    x += 8
+                elif form and form[0] in ("sub", "add"):
+                    x += form[1] if form[0] == "add" else -form[1]
+                elif t == "sub rsp, rax":   # __chkstk's frame: mov eax, n; call __chkstk; sub rsp, rax
+                    size = next((int(h.group(1), 0) for u in texts[max(0, i - 2):i]
+                                 if (h := re.fullmatch(r"mov eax, (0x[0-9a-f]+|\d+)", u))), None)
+                    if size is None:
+                        return False
+                    x -= size
+                elif form and form[0] == "fp" or t == "mov rbp, rsp":
+                    at = x + (form[1] if form else 0)
+                    if fp not in (None, at):
+                        return False
+                    fp = at
+                elif form and form[0] == "unfp":
+                    if fp is None:
+                        return False
+                    x = fp + form[1]
+                elif re.match(r"\w+ (?:rsp|esp|sp|spl)\b", t) and mnemonic not in ("cmp", "test"):
+                    return False
+                if re.match(r"\w+ (?:rbp|ebp|bp|bpl)\b", t) and mnemonic not in ("cmp", "test", "push", "pop") \
+                        and not (form or t == "mov rbp, rsp"):
+                    rbp_written = True
+                if mnemonic in ("ret", "ud2", "int3", "hlt"):
+                    break
+                if hit := TARGET.match(t):
+                    if hit.group(2) == "?" or hit.group(1) == "call":
+                        return False
+                    if hit.group(1) == "jmp":
+                        i = int(hit.group(2))
+                        continue
+                    work.append((int(hit.group(2)), x))
+                elif mnemonic == "jmp":   # a tail call, or a jump table whose cases are not followed
+                    if "<reloc>" not in operands:
+                        tables.append(x)
+                    break
+                i += 1
+        return True
+
+    if not walk(0, 0):
+        return None
+    for i in range(n):
+        if depth[i] is None and len(set(tables)) == 1 and not walk(i, tables[0]):
+            return None
+    if fp is not None and rbp_written:
+        return None
+    return depth, fp
+
+
+def _tokens(text, pattern):
+    """(skeleton, tokens): the instruction with its registers and stack operands taken out; a register as
+    ("r", name), a stack operand as ("m", size word or None, base, displacement)."""
+    tokens, skeleton, at = [], [], 0
+    for hit in pattern.finditer(text):
+        skeleton.append(text[at:hit.start()])
+        at = hit.end()
+        if hit.group("r"):
+            tokens.append(("r", hit.group("r")))
+        else:
+            _, size, base, sign, number = hit.groups()[:5]
+            tokens.append(("m", size, base, _signed(sign, number)))
+    skeleton.append(text[at:])
+    return "\0".join(skeleton), tokens
+
+
+def _equivalent(theirs, ours, stack=True):
+    """"registers", "stack slots", "stack layout" or two of them joined by "and", when two listings
+    [(offset, shown, call)] are the same function up to a renaming: None otherwise. The renaming is one to
+    one and the same across the whole function, branches inside the function compare by the instruction
+    they reach and calls by their callee. Registers: by family and width; rax, rcx, rdx, r8, r9, xmm0-5, rsp
+    (and rbp as a frame pointer, rbx where cpuid or cmpxchg16b use it, rsi and rdi where a string
+    instruction does) keep their names: they carry arguments, results or the stack; a callee-saved register
+    is renamed only to another one. Stack slots ([rsp + n], [rbp ± n]) as addresses from the return address,
+    followed through pushes and the frame (_frame), each access by its size: the caller's home area
+    (above the return address), the callee's (below [rsp + 0x20]) and the arguments passed on the stack (a
+    store since the previous call that is never read back) keep their place; accesses that overlap on
+    either side keep their distance; once an address is taken (lea) every temporary moves by the same amount.
+    "stack layout" when the frame's size differs too. When the stack pointer is used otherwise (copied,
+    indexed), stack operands must be the same and only registers are renamed."""
+    if len(theirs) != len(ours) or not theirs:
+        return None
+    a, b = _indexed([x[:2] for x in theirs]), _indexed([x[:2] for x in ours])
+    if a == b:
+        return None
+    for x, y in zip(theirs, ours):
+        if (x[2] is None) != (y[2] is None) or (x[2] and x[2][0] != y[2][0]):
+            return None
+    frames = _frame(a), _frame(b)
+    slots = stack and None not in frames and (frames[0][1] is None) == (frames[1][1] is None)
+    framed = slots and frames[0][1] is not None or any(
+        t == "mov rbp, rsp" or t.startswith("lea rbp, [rsp") for t in a + b)
+    patterns = [OPERANDS["rsp|rbp" if framed else "rsp"]] * 2 if slots else [REGISTER_ONLY] * 2
+    pinned = set(PINNED) | ({"bp"} if framed else set())
+    for t in a + b:
+        mnemonic = re.sub(r"^(?:lock|rep\w*) ", "", t).partition(" ")[0]
+        pinned |= HIDDEN.get(mnemonic, set())
+        if STRING_OP.match(t) and "mm" not in t:
+            pinned |= {"si", "di"}
+    if slots:   # the stack pointer (and the frame pointer) used only for the frame and its slots
+        for t in a + b:
+            used = [h.group("r") for h in patterns[0].finditer(t) if h.group("r")]
+            if any(FAMILY[r][0] == "sp" or framed and FAMILY[r][0] == "bp" for r in used) and not (
+                    _frame_form(t) or t in ("mov rbp, rsp", "sub rsp, rax")
+                    or re.fullmatch(r"xor \w+, (?:rsp|rbp)", t) or re.fullmatch(r"(?:push|pop) rbp", t)):
+                return _equivalent(theirs, ours, stack=False)
+    maps, renamed, accesses, frame_differs = ({}, {}), False, [], False
+    for i, (x, y) in enumerate(zip(a, b)):
+        if slots and ((fx := _frame_form(x)) or _frame_form(y)):
+            fy = _frame_form(y)
+            if not (fx and fy and fx[0] == fy[0]):
+                return None
+            frame_differs |= fx[1] != fy[1]
+            continue
+        (sx, tx), (sy, ty) = _tokens(x, patterns[0]), _tokens(y, patterns[1])
+        if sx != sy or len(tx) != len(ty):
+            return None
+        mnemonic = x.partition(" ")[0]
+        for k, (u, v) in enumerate(zip(tx, ty)):
+            if u[0] != v[0]:
+                return None
+            if u[0] == "r":
+                (fu, wu), (fv, wv) = FAMILY[u[1]], FAMILY[v[1]]
+                if wu != wv or (fu in pinned or fv in pinned) and fu != fv or (fu in VOLATILE) != (fv in VOLATILE):
+                    return None
+                if maps[0].setdefault(fu, fv) != fv or maps[1].setdefault(fv, fu) != fu:
+                    return None
+                renamed |= fu != fv
+                continue
+            if u[1] != v[1]:
+                return None
+            store = k == 0 and sx.startswith(mnemonic + " \0") and (mnemonic in STORES or mnemonic.startswith("set"))
+            sides = []
+            for (depth, fp), (_, _, base, disp) in zip(frames, (u, v)):
+                if depth[i] is None:
+                    return None
+                address = (depth[i] if base == "rsp" else fp) + disp
+                sides.append((address, address - depth[i]))
+            accesses.append((i, SIZES.get(u[1]) if mnemonic != "lea" else None, store, *sides))
+    if not accesses and not frame_differs:
+        return "registers" if renamed else None
+    return _stack_renamed(a, b, accesses, renamed, frame_differs)
+
+
+def _stack_renamed(a, b, accesses, renamed, frame_differs):
+    """The stack's part of _equivalent: accesses [(index, size or None, pure store, (address, rsp + n) shipped,
+    (address, rsp + n) ours)]."""
+    arguments = []
+    for side, texts in ((3, a), (4, b)):
+        read = {x[side][1] for x in accesses if not x[2]}
+        pending, args = set(), set()
+        by_index = {}
+        for x in accesses:
+            by_index.setdefault(x[0], []).append(x)
+        for i, t in enumerate(texts):
+            for x in by_index.get(i, []):
+                if x[2] and x[side][1] >= 0x20:
+                    pending.add(x[side][1])
+            if t.startswith("call ") or t == "jmp <reloc>" or t.startswith("jmp qword ptr [rip"):
+                args |= pending
+                pending = set()
+        arguments.append(args - read)
+    forward, back, shifts, escaped = {}, {}, set(), False
+    for i, size, store, (x, rx), (y, ry) in accesses:
+        if forward.setdefault(x, y) != y or back.setdefault(y, x) != x:
+            return None
+        fixed = x >= 0 or y >= 0 or rx < 0x20 or ry < 0x20 or rx in arguments[0] or ry in arguments[1]
+        if fixed and (x != y if x >= 0 or y >= 0 else rx != ry):
+            return None
+        if not fixed:
+            shifts.add(y - x)
+            escaped |= size is None
+    if escaped and len(shifts) > 1:
+        return None
+    sized = list({(x, y, size) for _, size, _, (x, _), (y, _) in accesses if size})
+    for k, (x1, y1, s1) in enumerate(sized):
+        for x2, y2, s2 in sized[k + 1:]:
+            if (x1 < x2 + s2 and x2 < x1 + s1 or y1 < y2 + s2 and y2 < y1 + s1) and x2 - x1 != y2 - y1:
+                return None
+    moved = any(rx != ry for _, _, _, (_, rx), (_, ry) in accesses)
+    kinds = (["registers"] if renamed else []) + (["stack layout"] if frame_differs else ["stack slots"] if moved else [])
+    return " and ".join(kinds) or None
 
 
 FRAME = re.compile(r"^(sub|add) rsp, (0x[0-9a-f]+|\d+)$")

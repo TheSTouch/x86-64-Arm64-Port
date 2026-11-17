@@ -337,6 +337,126 @@ class MatchTest(unittest.TestCase):
         self.assertEqual(decomp._renamed(stack, both), "registers and stack slots only")
         self.assertIsNone(decomp._renamed(stack, stack[:1]))
 
+    @staticmethod
+    def listing(texts, calls=None):
+        """[(offset, shown, call)] as _align gives them to _equivalent, an instruction every 4 bytes."""
+        return [(4 * i, t, (calls or {}).get(i)) for i, t in enumerate(texts)]
+
+    def equivalent(self, theirs, ours, calls=None, our_calls=None):
+        return decomp._equivalent(self.listing(theirs, calls), self.listing(ours, calls if our_calls is None else our_calls))
+
+    def test_equivalent_up_to_registers(self):
+        f = {2: (0x5000, "Widget::Get")}
+        theirs = ["push rbx", "mov rbx, rcx", "call <reloc>", "mov rax, rbx", "je +00018", "add ebx, 0x1",
+                  "pop rbx", "ret"]
+        ours = ["push rdi", "mov rdi, rcx", "call <reloc>", "mov rax, rdi", "je +00018", "add edi, 0x1",
+                "pop rdi", "ret"]
+        self.assertEqual(self.equivalent(theirs, ours, f), "registers")
+        self.assertIsNone(self.equivalent(theirs, theirs, f))     # nothing renamed: not this status
+        self.assertIsNone(self.equivalent(theirs, ours[:4] + ["je +00014"] + ours[5:], f))  # another target
+        self.assertIsNone(self.equivalent(theirs, ours, f, {2: (0x6000, "Widget::Other")}))  # another callee
+        self.assertIsNone(self.equivalent(theirs, ours, f, {}))
+        # one to one across the whole function: two shipped registers in one of ours, or one in two
+        self.assertIsNone(self.equivalent(["mov rbx, rcx", "mov rdi, rdx", "add rbx, rdi", "ret"],
+                                          ["mov rsi, rcx", "mov rsi, rdx", "add rsi, rsi", "ret"]))
+        self.assertIsNone(self.equivalent(["mov rbx, rcx", "add rbx, rdx", "ret"],
+                                          ["mov rsi, rcx", "add rdi, rdx", "ret"]))
+        self.assertIsNone(self.equivalent(["mov ebx, ecx", "ret"], ["mov rsi, rcx", "ret"]))   # another width
+        # the calling convention's registers keep their names: an argument, the return value
+        self.assertIsNone(self.equivalent(["mov rcx, rbx", "call <reloc>", "ret"],
+                                          ["mov rdx, rbx", "call <reloc>", "ret"], {1: (0x5000, "F")}))
+        self.assertIsNone(self.equivalent(["mov eax, 0x1", "ret"], ["mov r10d, 0x1", "ret"]))
+        self.assertIsNone(self.equivalent(["movaps xmm0, xmm6", "ret"], ["movaps xmm1, xmm6", "ret"]))
+        # a callee-saved register is never one the callee may change
+        self.assertIsNone(self.equivalent(["mov r10, rcx", "add r10, 0x8", "mov rax, r10", "ret"],
+                                          ["mov rbx, rcx", "add rbx, 0x8", "mov rax, rbx", "ret"]))
+        self.assertEqual(self.equivalent(["mov r10, rcx", "add r10, 0x8", "mov rax, r10", "ret"],
+                                         ["mov r11, rcx", "add r11, 0x8", "mov rax, r11", "ret"]), "registers")
+        self.assertEqual(self.equivalent(["movaps xmm6, xmm0", "ret"], ["movaps xmm7, xmm0", "ret"]), "registers")
+        # registers an instruction uses without naming them keep their names (cpuid writes rbx)
+        self.assertIsNone(self.equivalent(["mov rbx, rcx", "cpuid", "ret"], ["mov rsi, rcx", "cpuid", "ret"]))
+
+    def test_equivalent_up_to_stack_slots(self):
+        f = {7: (0x5000, "F")}
+        theirs = ["push rbx", "sub rsp, 0x40", "mov rbx, rcx", "mov qword ptr [rsp + 0x30], rax",
+                  "mov dword ptr [rsp + 0x28], edx", "mov rcx, qword ptr [rsp + 0x30]",
+                  "mov edx, dword ptr [rsp + 0x28]", "call <reloc>", "add rsp, 0x40", "pop rbx", "ret"]
+        swapped = theirs[:3] + ["mov qword ptr [rsp + 0x28], rax", "mov dword ptr [rsp + 0x38], edx",
+                                "mov rcx, qword ptr [rsp + 0x28]", "mov edx, dword ptr [rsp + 0x38]"] + theirs[7:]
+        self.assertEqual(self.equivalent(theirs, swapped, f), "stack slots")
+        both = [x.replace("rbx", "rsi") for x in swapped]
+        self.assertEqual(self.equivalent(theirs, both, f), "registers and stack slots")
+        two = theirs[:3] + ["mov qword ptr [rsp + 0x28], rax", "mov dword ptr [rsp + 0x28], edx",
+                            "mov rcx, qword ptr [rsp + 0x28]", "mov edx, dword ptr [rsp + 0x28]"] + theirs[7:]
+        self.assertIsNone(self.equivalent(theirs, two, f))            # two slots in one
+        # an argument passed on the stack (stored before the call, never read back) stays where it is
+        arg = theirs[:3] + ["mov qword ptr [rsp + 0x20], rax", "call <reloc>"] + theirs[8:]
+        moved = theirs[:3] + ["mov qword ptr [rsp + 0x28], rax", "call <reloc>"] + theirs[8:]
+        self.assertIsNone(self.equivalent(arg, moved, {4: (0x5000, "F")}))
+        # the caller's home area (above the frame) too
+        home = theirs[:3] + ["mov qword ptr [rsp + 0x50], rcx", "mov rax, qword ptr [rsp + 0x50]"] + theirs[8:]
+        self.assertIsNone(self.equivalent(home, home[:3] + ["mov qword ptr [rsp + 0x58], rcx",
+                                                            "mov rax, qword ptr [rsp + 0x58]"] + home[5:]))
+        # a qword and its upper half move together
+        halves = theirs[:3] + ["mov qword ptr [rsp + 0x30], rax", "mov ecx, dword ptr [rsp + 0x34]"] + theirs[8:]
+        self.assertEqual(self.equivalent(halves, halves[:3] + ["mov qword ptr [rsp + 0x38], rax",
+                                                               "mov ecx, dword ptr [rsp + 0x3c]"] + halves[5:]),
+                         "stack slots")
+        self.assertIsNone(self.equivalent(halves, halves[:3] + ["mov qword ptr [rsp + 0x38], rax",
+                                                                "mov ecx, dword ptr [rsp + 0x30]"] + halves[5:]))
+        # an address taken: the callee may reach any of it, so every temporary moves by the same amount
+        lea = theirs[:3] + ["lea rcx, [rsp + 0x30]", "call <reloc>", "mov eax, dword ptr [rsp + 0x38]"] + theirs[8:]
+        g = {4: (0x5000, "F")}
+        self.assertEqual(self.equivalent(lea, lea[:3] + ["lea rcx, [rsp + 0x28]", "call <reloc>",
+                                                         "mov eax, dword ptr [rsp + 0x30]"] + lea[6:], g), "stack slots")
+        self.assertIsNone(self.equivalent(lea, lea[:3] + ["lea rcx, [rsp + 0x28]", "call <reloc>",
+                                                          "mov eax, dword ptr [rsp + 0x38]"] + lea[6:], g))
+        # the stack pointer copied: its slots are no longer followed, registers only
+        copied = theirs[:3] + ["mov rax, rsp", "mov qword ptr [rsp + 0x30], rbx", "mov rcx, qword ptr [rsp + 0x30]"] \
+            + theirs[8:]
+        self.assertIsNone(self.equivalent(copied, copied[:4] + ["mov qword ptr [rsp + 0x38], rbx",
+                                                                "mov rcx, qword ptr [rsp + 0x38]"] + copied[6:]))
+        self.assertEqual(self.equivalent(copied, [x.replace("rbx", "rdi") for x in copied]), "registers")
+
+    def test_equivalent_up_to_the_stack_layout(self):
+        # a bigger frame: the same temporaries at the same distance from the return address, the outgoing
+        # argument at the same [rsp + n], the caller's home area followed through the frame's size
+        theirs = ["push rbx", "sub rsp, 0x40", "mov qword ptr [rsp + 0x50], rcx", "mov qword ptr [rsp + 0x30], rdx",
+                  "mov qword ptr [rsp + 0x20], r8", "call <reloc>", "mov rax, qword ptr [rsp + 0x30]",
+                  "mov rcx, qword ptr [rsp + 0x50]", "add rsp, 0x40", "pop rbx", "ret"]
+        ours = ["push rbx", "sub rsp, 0x50", "mov qword ptr [rsp + 0x60], rcx", "mov qword ptr [rsp + 0x40], rdx",
+                "mov qword ptr [rsp + 0x20], r8", "call <reloc>", "mov rax, qword ptr [rsp + 0x40]",
+                "mov rcx, qword ptr [rsp + 0x60]", "add rsp, 0x50", "pop rbx", "ret"]
+        f = {5: (0x5000, "F")}
+        self.assertEqual(self.equivalent(theirs, ours, f), "stack layout")
+        moved = [x.replace("[rsp + 0x60]", "[rsp + 0x50]") for x in ours]     # the home area not followed
+        self.assertIsNone(self.equivalent(theirs, moved, f))
+        self.assertIsNone(self.equivalent(theirs, ours[:4] + ["mov qword ptr [rsp + 0x30], r8"] + ours[5:], f))
+        # with a frame pointer: rbp's slots are the same temporaries as rsp's
+        framed = ["push rbp", "lea rbp, [rsp - 0x10]", "sub rsp, 0x40", "mov qword ptr [rbp - 0x8], rcx",
+                  "mov rax, qword ptr [rsp + 0x28]", "add rsp, 0x40", "pop rbp", "ret"]
+        same = ["push rbp", "lea rbp, [rsp - 0x10]", "sub rsp, 0x40", "mov qword ptr [rbp - 0x10], rcx",
+                "mov rax, qword ptr [rsp + 0x20]", "add rsp, 0x40", "pop rbp", "ret"]
+        self.assertEqual(self.equivalent(framed, same), "stack slots")   # [rbp - 0x8] is [rsp + 0x28]
+        self.assertIsNone(self.equivalent(framed, same[:4] + ["mov rax, qword ptr [rsp + 0x28]"] + same[5:]))
+
+    @unittest.skipUnless(shutil.which("objdump"), "needs objdump (Xcode command line tools)")
+    def test_equivalent_is_a_status_of_its_own(self):
+        def run(shipped, ours):
+            data = bytearray(build_dll())
+            data[0x410 + 0xe:0x410 + 0xe + len(shipped)] = shipped   # after the shipped ret
+            self.dll.write_bytes(bytes(data))
+            body = shipped_body()[:0xe] + ours
+            return self.match([(CONSTRUCT, body + shipped_body()[len(body):],
+                                [(2, 4, "__imp_ExitProcess"), (9, 4)])])[CONSTRUCT]   # the same callee
+        r = run(b"\x48\x89\xf3", b"\x48\x89\xf7")       # mov rbx, rsi there, mov rdi, rsi here
+        self.assertEqual(r.state, "equivalent")
+        self.assertTrue(r.detail.startswith("(registers), at +0x10"), r.detail)
+        self.assertTrue(decomp.match_line(r).startswith("equivalent ?Construct@FGScreen@@"))
+        self.assertTrue(decomp.match_line(r).endswith(" score 1"))
+        r = run(b"\x48\x89\xf3\x48\x89\xf7", b"\x48\x89\xf3\x48\x89\xf3")   # rbx and rdi both rbx here
+        self.assertEqual(r.state, "differs")
+
     def test_register_allocation_only(self):
         # this kept in rsi there, a callee-saved register spilled here: the same computation
         theirs = [(0, "mov rsi, rcx"), (3, "mov eax, dword ptr [rsi + 0x8]"), (6, "add rsi, 0x10"), (0xa, "ret")]

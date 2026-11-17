@@ -78,7 +78,9 @@ Helpful, not required:
    conversation that built it:
    - the per-function loop: spec on PDB lines, background match, one `--diff` read, at most one try, queue the rest;
    - the generic matching rules learned on Satisfactory (MSVC and Unreal ones: check macros, `/fp:fast`, cast and
-     ternary order, unity-blob inlining, `TObjectPtr` temporaries, ...);
+     ternary order, unity-blob inlining, `TObjectPtr` temporaries, ...), and the third status of `./port msvc
+     match`, `equivalent (registers | stack slots | stack layout)`: the same code up to a one-to-one renaming that
+     keeps the calling convention's registers and the stack's argument slots, reported apart from matched;
    - the batch and coordinator prompt templates for parallel sessions: one unity blob per session, prompts in a file,
      one start line per session, don't stop for context, write down any wait;
    - the leftovers pass after a milestone;

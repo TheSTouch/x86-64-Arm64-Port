@@ -511,4 +511,7 @@ layers/imagelog/build.sh
   qualified name when only one has it; lambdas, local classes and dynamic initializers by scope), masks the
   bytes relocations fill, and says matched or where the
   first difference is, with a score. `./port msvc match` compiles a blob on the Mac first, with MSVC
-  14.38.33130 under Wine and UBT's own flags ("Making recovery faster", item 1).
+  14.38.33130 under Wine and UBT's own flags ("Making recovery faster", item 1). A function that differs only by a
+  renaming gets a status of its own, `equivalent (registers)`, `(stack slots)` or `(stack layout)`, on its own
+  `equivalent` line: the renaming is one to one across the whole function, the calling convention's registers and
+  the stack's argument and home areas keep their place, and it is counted apart from matched and not hooked.
