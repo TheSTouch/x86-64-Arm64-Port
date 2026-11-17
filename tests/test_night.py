@@ -210,6 +210,12 @@ class NightTest(unittest.TestCase):
         self.assertTrue(any("going on" in line for line in self.logs))
         self.assertGreaterEqual(json.loads((self.results / "state.json").read_text())["waited"], 90)
 
+    def test_its_own_compiles_are_no_reason_to_wait(self):
+        n, _ = self.night(machine=Machine(loads=[5.5] * 50), hours=0.05)
+        n.inflight = 2   # two of its compiles running: 5.5 - 2 is under 4
+        n.wait_for_room()
+        self.assertFalse(any("waiting" in line for line in self.logs))
+
     def test_a_match_that_breaks_another_function_is_no_win(self):
         compiler = FakeCompiler(self.project, self.clock, lose="Other::Fine")
         n, _ = self.night(compiler=compiler, hours=0.2)

@@ -279,6 +279,8 @@ class Night:
         self.started = clock()
         self.last_perf = None
         self.wait_lock = threading.Lock()
+        self.inflight = 0
+        self.inflight_lock = threading.Lock()
         self.members_cache = {}
         self.headers = None
         self._log_file = open(self.results / "night.log", "a", encoding="utf-8")
@@ -303,10 +305,11 @@ class Night:
             said = None
             while not self.stopping():
                 why = self.machine.busy()
-                load = self.machine.load()
+                load = self.machine.load() - self.inflight   # its own compiles are not a reason to wait
                 if why is None and load <= self.max_load:
                     break
-                reason = f"{why} is running" if why else f"load {load:.1f} > {self.max_load:.1f}"
+                reason = f"{why} is running" if why else f"load {load:.1f} > {self.max_load:.1f} (its own " \
+                    f"{self.inflight} compiles left out)"
                 if reason.split(" ")[0] != (said or "").split(" ")[0]:
                     self.log(f"waiting: {reason}")
                     said = reason
@@ -379,7 +382,13 @@ class Night:
         src.mkdir(parents=True, exist_ok=True)
         path = self.staged_path(row.file)
         (src / path.name).write_text(text[:span[0]] + candidate + text[span[1]:], encoding="utf-8")
-        return self.compiler.compile(row.blob, worker, function=row.function, include_first=src)
+        with self.inflight_lock:
+            self.inflight += 1
+        try:
+            return self.compiler.compile(row.blob, worker, function=row.function, include_first=src)
+        finally:
+            with self.inflight_lock:
+                self.inflight -= 1
 
     # -------------------------------------------------------------------------------- one function
 
