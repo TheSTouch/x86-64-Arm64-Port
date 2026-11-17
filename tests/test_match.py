@@ -543,3 +543,24 @@ class MatchTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class BriefTest(unittest.TestCase):
+    def test_the_score_the_calls_on_one_side_and_the_first_differing_region(self):
+        rows = [("=", (i, f"mov eax, {i}"), (i, f"mov eax, {i}")) for i in range(10)]
+        rows += [("<", (10, "call <reloc>  ; FFoo::Bar"), None), ("!", (15, "add eax, 1"), (10, "add eax, 2"))]
+        rows += [("=", (20 + i, "nop"), (11 + i, "nop")) for i in range(40)]
+        rows += [(">", None, (60, "call <reloc>  ; FFoo::Baz")), ("!", (70, "ret"), (61, "int3"))]
+        r = decomp.Match("?F@@YAXXZ", "differs", "F", 80, 10, "at +0xa", 4, rows, "inlined here, called there: FFoo::Bar")
+        text = decomp.brief_listing(r)
+        lines = text.splitlines()
+        self.assertTrue(lines[0].startswith("; ?F@@YAXXZ  [F]: differs"))
+        self.assertIn("verdict: inlined here, called there: FFoo::Bar", text)
+        self.assertIn("calls only in the shipped code (inlined here): FFoo::Bar", text)
+        self.assertIn("calls only here (inlined there): FFoo::Baz", text)
+        self.assertIn("first difference: +0000a (2 regions)", text)
+        listing = [l for l in lines if l[:2] in ("= ", "! ", "< ", "> ")]
+        self.assertLessEqual(len(listing), 30)
+        self.assertTrue(listing[0].startswith("= +00007"))   # three lines of context before
+        self.assertNotIn("int3", text)                       # only the first region
+        self.assertEqual(lines[-1], "score 4")

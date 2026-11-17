@@ -1246,3 +1246,41 @@ def _write(beside, function, original, start, end, run):
     for i, c in enumerate(run.best):
         (beside / f"{safe}.{i + 1}.score{c.score}.cpp").write_text(original[:start] + c.body + original[end:],
                                                                      encoding="utf-8")
+
+
+def try_variants(project, file_name, variants, functions=(), jobs=3, module="FactoryGameRecomp"):
+    """Variants of one recovered file (each a whole file), compiled side by side, each from a worker folder of its
+    own searched first (as a copy of the staged project would, without copying it), and matched: rows (variant,
+    function, state, score) for each of `functions` (every function of the blob that differs or matches when
+    none is named); (variant, None, "failed", the first error) for one that does not compile."""
+    project = Path(project).resolve()
+    if project.is_relative_to(config.RECOVERED_REPO.resolve()) or config.inside_repository(project):
+        raise Fail(f"{project}: variants compile in a staged copy, never in the recovered-code repository or here")
+    path = recovered_file(project, file_name)
+    blob = msvc.blob_name(file_name, project)
+    if msvc.pch_of(module, blob):
+        msvc.build_pch(msvc.pch_of(module, blob))
+    shipped = decomp.Module(msvc.shipped_dll(module))
+    root = config.MSVC_BUILDS / "try" / project.name
+    variants = [Path(v) for v in variants]
+
+    def one(k):
+        worker = root / f"v{k}"
+        src = worker / "src"
+        shutil.rmtree(src, ignore_errors=True)
+        src.mkdir(parents=True)
+        shutil.copyfile(variants[k], src / path.name)
+        c = msvc.compile_one(project, module, blob, worker, include_first=src)
+        if not c.ok:
+            first = next((line for line in c.output.splitlines() if "error" in line), c.output.strip()[:200])
+            return [(variants[k], None, "failed", first.strip())]
+        with _MATCH:
+            rows = decomp.match(shipped, c.obj)
+        out = []
+        for f in functions or [r.shipped or r.name for r in rows if r.state != "missing"]:
+            mine = [r for r in rows if f in (r.name, r.shipped)]
+            out.append((variants[k], f, mine[0].state if mine else "missing", mine[0].score if mine else None))
+        return out
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, jobs)) as pool:
+        return [row for rows in pool.map(one, range(len(variants))) for row in rows]

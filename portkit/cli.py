@@ -201,7 +201,7 @@ def cmd_decomp(a):
         results = decomp.match(a.dll, a.match, a.diff or ())
         for r in results:
             if a.diff and (r.name in a.diff or r.shipped in a.diff):
-                print(decomp.diff_listing(r))
+                print(decomp.brief_listing(r) if a.brief else decomp.diff_listing(r))
             if not a.diff or r.name in a.diff or r.shipped in a.diff:
                 print(decomp.match_line(r))
         counts = {s: sum(r.state == s for r in results) for s in ("matched", "equivalent", "differs", "missing")}
@@ -358,6 +358,11 @@ def cmd_msvc(a):
         print(f"{n['same'] + n['differs']} functions in both: {n['same']} with the same code, {n['differs']} not; "
               f"{n['only-a']} only in the first, {n['only-b']} only in the second", file=sys.stderr)
         return 1 if n["differs"] or n["only-a"] else 0
+    if a.action == "try":
+        rows = permute.try_variants(a.project, a.file, a.variants, functions=a.function or (), jobs=a.jobs)
+        for variant, function, state, score in rows:
+            print(f"{variant.name}\t{function or '-'}\t{state}\t{'-' if score is None else score}")
+        return 0 if any(state == "matched" for _, _, state, _ in rows) else 1
     if a.action == "match":
         project = Path(a.project)
         sources = [msvc.blob_name(t, project, a.module) for t in a.targets]
@@ -396,6 +401,10 @@ def _msvc_args(a):
         a.obj = a.args[0]
     elif a.action == "compare":
         a.obj, a.other = a.args
+    elif a.action == "try":
+        if len(a.args) < 3:
+            raise Fail("usage: ./port msvc try STAGED_PROJECT File.cpp VARIANT.cpp [...] [--function NAME] [--jobs N]")
+        a.project, a.file, a.variants = a.args[0], a.args[1], a.args[2:]
     elif a.action == "match":
         if len(a.args) < 2:
             raise Fail("usage: ./port msvc match STAGED_PROJECT BLOB|File.cpp [...]")
@@ -514,6 +523,8 @@ def parser():
                     "the instructions not the same once both are aligned")
     sp.add_argument("--diff", action="append", metavar="NAME", help="with --match: this function's shipped and "
                     "compiled disassembly side by side (decorated or shipped name; may be repeated)")
+    sp.add_argument("--brief", action="store_true", help="with --diff: the score, the calls on one side only "
+                    "(inlined on the other) and the first differing region alone (at most 30 lines)")
     sp.add_argument("--families", action="store_true", help="group the game's functions (with --trace, those the "
                     "traces ran) whose code is the same once numbers are masked, or near it (lengths within 10 %%, "
                     "instructions 90 %% the same)")
@@ -581,11 +592,12 @@ def parser():
 
     sp = sub.add_parser("msvc", help="MSVC 14.38 under Wine: the PC's compiles replayed on the Mac, one unity "
                         "blob compiled and matched without UBT")
-    sp.add_argument("action", choices=["cl", "flags", "mirror", "match", "compare"],
+    sp.add_argument("action", choices=["cl", "flags", "mirror", "match", "compare", "try"],
                     help="cl: run cl.exe with ARGS; flags: the command line an object records, and its response "
                     "file's; mirror: fetch what only the PC has; match: compile blobs of a staged project and match "
-                    "them; compare: two objects' code, function by function")
-    sp.add_argument("args", nargs="*", metavar="ARG", help="cl: its arguments; flags: OBJ; compare: OBJ OBJ; "
+                    "them; compare: two objects' code, function by function; try: variants of one recovered file compiled side by "
+                    "side, one line per variant and function")
+    sp.add_argument("args", nargs="*", metavar="ARG", help="cl: its arguments; flags: OBJ; compare: OBJ OBJ; try: STAGED_PROJECT File.cpp VARIANT.cpp...; "
                     "match: STAGED_PROJECT then blob numbers, blob names or recovered File.cpp names")
     sp.add_argument("--rsp", metavar="FILE", help="flags: the response file (default: the mirrored one of the same name)")
     sp.add_argument("--args", dest="args_out", action="store_true", help="flags: print the response file's arguments")
@@ -600,6 +612,8 @@ def parser():
     sp.add_argument("--no-pch", action="store_true", help="match: no PCH, its header forced (faster to start, but some "
                     "inlining differs from the PC's)")
     sp.add_argument("-v", "--verbose", action="store_true", help="compare: list the functions that are the same too")
+    sp.add_argument("--function", action="append", metavar="NAME", help="try: the function to report (may be "
+                    "repeated; default: every function of the blob)")
     sp.set_defaults(fn=_msvc_args)
 
     sp = sub.add_parser("cdo", help="constructor-body lines from the default objects the hook loader's dump mode "

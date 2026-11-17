@@ -213,3 +213,51 @@ class GuardTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TryTest(unittest.TestCase):
+    def test_variants_compile_side_by_side_each_from_its_own_folder(self):
+        from portkit import decomp, msvc
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "Project"
+            path = project / "Source" / "FactoryGameRecomp-Recovered" / "FGFoo.cpp"
+            path.parent.mkdir(parents=True)
+            path.write_text(SOURCE)
+            variants = []
+            for k, text in enumerate([SOURCE.replace("mA = 1;", "mA = 2;"), SOURCE, "does not compile"]):
+                v = Path(tmp) / f"v{k}.cpp"
+                v.write_text(text)
+                variants.append(v)
+            seen, lock = [], threading.Lock()
+
+            def compile_one(project_, module, blob, out_dir, include_first=None, **kw):
+                text = (include_first / "FGFoo.cpp").read_text()
+                with lock:
+                    seen.append(include_first)
+                obj = Path(out_dir) / "x.obj"
+                obj.parent.mkdir(parents=True, exist_ok=True)
+                obj.write_text(text)
+                return msvc.Compiled(blob, obj, 1.0, text != "does not compile", "error C2143" if text == "does not compile" else "")
+
+            def match(shipped, obj, only=None):
+                text = Path(obj).read_text()
+                return [decomp.Match("?Tick@UFoo@@QEAAXM@Z", "matched" if "mA = 2;" in text else "differs", "UFoo::Tick",
+                                     score=0 if "mA = 2;" in text else 7),
+                        decomp.Match("?GetBar@UFoo@@", "matched", "UFoo::GetBar", score=0)]
+
+            saved = config.MSVC_BUILDS
+            config.MSVC_BUILDS = Path(tmp) / "builds"
+            try:
+                with mock.patch.object(permute.msvc, "compile_one", side_effect=compile_one), \
+                        mock.patch.object(permute.msvc, "blob_name", return_value="Module.FactoryGame.1.cpp"), \
+                        mock.patch.object(permute.msvc, "pch_of", return_value=None), \
+                        mock.patch.object(permute.decomp, "match", side_effect=match), \
+                        mock.patch.object(permute.decomp, "Module"):
+                    rows = permute.try_variants(project, "FGFoo.cpp", variants, functions=["UFoo::Tick"], jobs=3)
+            finally:
+                config.MSVC_BUILDS = saved
+            self.assertEqual([(v.name, f, s, sc) for v, f, s, sc in rows],
+                             [("v0.cpp", "UFoo::Tick", "matched", 0), ("v1.cpp", "UFoo::Tick", "differs", 7),
+                              ("v2.cpp", None, "failed", "error C2143")])
+            self.assertEqual(len(set(seen)), 3)                  # a folder of its own each
+            self.assertEqual(path.read_text(), SOURCE)           # the staged file untouched

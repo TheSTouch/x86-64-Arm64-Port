@@ -705,6 +705,50 @@ def diff_listing(r):
     return "\n".join(out) + "\n"
 
 
+BRIEF_LINES = 30
+
+
+def brief_listing(r, context=3):
+    """A short --diff for a session that reads many: the header, the verdict, the calls made on one side only
+    (what the other side inlined), and the first differing region alone, with a little context, at most
+    BRIEF_LINES lines of listing; then `score <n>`."""
+    out = [f"; {r.name}  [{r.shipped}]: {r.state}" + (f", {r.detail}" if r.detail else "")]
+    if r.verdict:
+        out.append(f"verdict: {r.verdict}")
+    sides = [Counter(), Counter()]
+    for _, left, right in r.rows:
+        for k, x in enumerate((left, right)):
+            if x and "  ; " in x[1] and re.match(r"(call|jmp)\b", x[1]):
+                sides[k][x[1].rsplit("  ; ", 1)[1]] += 1
+    only = sides[0] - sides[1], sides[1] - sides[0]
+    if only[0]:
+        out.append("calls only in the shipped code (inlined here): " + ", ".join(sorted(only[0])))
+    if only[1]:
+        out.append("calls only here (inlined there): " + ", ".join(sorted(only[1])))
+    marks = [m for m, *_ in r.rows]
+    first = next((i for i, m in enumerate(marks) if m != "="), None)
+    if first is not None:
+        regions, i = 0, 0
+        while i < len(marks):
+            if marks[i] != "=":
+                regions += 1
+                while i < len(marks) and marks[i] != "=":
+                    i += 1
+            i += 1
+        end = first
+        while end < len(marks) and marks[end] != "=":
+            end += 1
+        start = max(0, first - context)
+        stop = min(len(marks), end + context, start + BRIEF_LINES)
+        at = next((x[0] for _, x, y in r.rows[first:] for x in (x, y) if x), 0)
+        out.append(f"first difference: +{at:05x} ({regions} region{'s' if regions != 1 else ''})")
+        for mark, left, right in r.rows[start:stop]:
+            left = f"+{left[0]:05x}  {left[1]}" if left else ""
+            out.append(f"{mark} {left:<59} {f'+{right[0]:05x}  {right[1]}' if right else ''}".rstrip())
+    out.append(f"score {r.score}")
+    return "\n".join(out) + "\n"
+
+
 def qualified_name(decorated):
     """"Scope::Name" from a plain MSVC decorated name (?Name@Scope@@...); None for operators,
     constructors, templates and undecorated names."""
