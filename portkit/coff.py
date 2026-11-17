@@ -42,6 +42,7 @@ class Function:
     code: bytes
     masked: set   # offsets (from the function's start) of bytes a relocation fills
     targets: dict = field(default_factory=dict)   # offset of each relocated field -> the symbol it names
+    kinds: dict = field(default_factory=dict)     # offset of each relocated field -> its IMAGE_REL_AMD64_* type
 
 
 @dataclass
@@ -64,12 +65,13 @@ class Object:
             entries.sort()
             for i, (value, name) in enumerate(entries):
                 end = entries[i + 1][0] if i + 1 < len(entries) else len(s.data)
-                masked, targets = set(), {}
+                masked, targets, kinds = set(), {}, {}
                 for off, symbol, kind in s.relocations:
                     masked.update(o - value for o in range(off, off + RELOC_SIZE.get(kind, 0)) if value <= o < end)
                     if value <= off < end:
                         targets[off - value] = names.get(symbol)
-                out.append(Function(name, s.data[value:end], masked, targets))
+                        kinds[off - value] = kind
+                out.append(Function(name, s.data[value:end], masked, targets, kinds))
         return out
 
 

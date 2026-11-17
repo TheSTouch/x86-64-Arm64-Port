@@ -884,6 +884,43 @@ def match(dll, obj, diff=(), only=None):
     return results
 
 
+ADDR32NB = 0x3
+
+
+def relocation_targets(dll, obj, function):
+    """The relocations of `function` (decorated or shipped name) in a compiled object whose target is not
+    where the shipped code's field points: [(offset, our symbol, shipped label)]. Matching masks the bytes
+    a relocation fills, so two calls swapped, or one global read for another, still match; this tells them
+    apart wherever the symbol's address in the shipped module is known (rva_of), and skips the others
+    (string literals, local statics). None when the function is not in the object or not paired."""
+    m = dll if isinstance(dll, Module) else Module(dll)
+    results = [r for r in match(m, obj, only=function) if r.state != "missing"]
+    if not results:
+        return None
+    fn = next((f for f in coff.parse(Path(obj).read_bytes()).functions() if f.name == results[0].name), None)
+    start = m.paired.get(results[0].name)
+    if fn is None or start is None:
+        return None
+    ref = m._bytes_at(start, len(fn.code) + 8)
+    out = []
+    for off, symbol in sorted(fn.targets.items()):
+        ours = m.rva_of(symbol) if symbol else None
+        kind = fn.kinds.get(off)
+        if ours is None or kind is None:
+            continue
+        if kind == coff.ADDR64:
+            theirs = struct.unpack_from("<Q", ref, off)[0] - m.image.image_base
+        elif kind == ADDR32NB:
+            theirs = struct.unpack_from("<I", ref, off)[0]
+        elif coff.REL32 <= kind <= coff.REL32 + 5:
+            theirs = start + off + 4 + (kind - coff.REL32) + struct.unpack_from("<i", ref, off)[0]
+        else:
+            continue
+        if theirs != ours:   # identical functions the linker folded share one address: the same here
+            out.append((off, symbol, m.label(theirs) or f"{theirs:#x}"))
+    return out
+
+
 def _align(m, pairs):
     if not pairs or not objdump():
         return

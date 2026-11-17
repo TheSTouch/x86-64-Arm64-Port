@@ -105,6 +105,8 @@ MSVC_MIRROR = Path(_setting("MSVC_MIRROR", SMART / "msvc-mirror"))
 MSVC_BUILDS = Path(_setting("MSVC_BUILDS", SMART / "satisfactory-builds" / "mac"))
 # The recovered-code repository: tools read it, never write into it (`permute` works on a staged copy).
 RECOVERED_REPO = Path(_setting("RECOVERED_REPO", SMART / "satisfactory-recomp"))
+# The only identity `night apply --commit` commits as (git's user.email in the recovered-code repository).
+COMMIT_EMAIL = _setting("COMMIT_EMAIL", "347618054+TheSTouch@users.noreply.github.com")
 # The engine on the Mac: a clone of the tag the PC's engine was installed from.
 ENGINE_DIR = Path(_setting("ENGINE_DIR", SMART / "custom-repos" / "UnrealEngine-CSS"))
 # What pdb.py keeps of a large PDB (its functions and public symbols), to read it in a fraction of the time.

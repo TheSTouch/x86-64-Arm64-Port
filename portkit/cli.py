@@ -7,7 +7,7 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-from . import bench, cdo, config, decomp, games, hooks, msvc, pdb, permute, inspect, kettle, overlay, runtime, session, steam, trace, wine
+from . import bench, cdo, config, decomp, games, hooks, msvc, night, pdb, permute, inspect, kettle, overlay, runtime, session, steam, trace, wine
 from .util import Fail, free_gb, step, sysctl
 
 
@@ -422,6 +422,41 @@ def cmd_permute(a):
     return 0 if best.score == 0 else 1
 
 
+def cmd_night(a):
+    args = a.args
+    if args and args[0] == "apply":
+        if len(args) != 3:
+            raise Fail("usage: ./port night apply RESULTS RECOVERED_REPO [--stage DIR] [--carry CMD] [--commit] [--push]")
+        return night_apply(a, args[1], args[2])
+    if args and args[0] == "fetch":
+        if len(args) != 3:
+            raise Fail("usage: ./port night fetch HOST REMOTE_RESULTS [--results DIR]")
+        return night_fetch(a, args[1], args[2])
+    if len(args) != 2:
+        raise Fail("usage: ./port night STAGED_PROJECT LIST.tsv [--hours N | --until HH:MM] [--jobs N] ...")
+    project, listing = Path(args[0]), Path(args[1])
+    results = Path(a.results) if a.results else config.SMART / "night" / project.name
+    deadline = night.deadline_from(hours=a.hours, until=a.until)
+    night.run(project, listing, results, order=a.order, jobs=a.jobs, max_load=a.max_load,
+                      per_function_minutes=a.per_function_minutes, deadline=deadline, seed=a.seed,
+                      machine=night.Machine(busy=tuple(x for x in (a.busy or "").split(",") if x)),
+                      log=lambda m: print(m, flush=True))
+    print((results / "perf.txt").read_text())
+    return 0
+
+
+def night_apply(a, results, repo):
+    marks = night.apply(results, repo, stage=a.stage, carry=a.carry, commit=a.commit, push=a.push,
+                        log=lambda m: print(m, flush=True))
+    applied = sum(v == "applied" for v in marks.values())
+    print(f"{applied} of {len(marks)} wins applied" + (" and committed" if a.commit and applied else ""))
+    return 0
+
+
+def night_fetch(a, host, remote):
+    raise Fail("night fetch: not written yet")
+
+
 def parser():
     p = argparse.ArgumentParser(prog="port", description="Windows games on Apple Silicon: Porting Kit "
                                 "(Game Porting Toolkit) now, native recompilation where a game has one.")
@@ -584,6 +619,30 @@ def parser():
     sp.add_argument("--jobs", type=int, default=3, help="candidates compiled at once (default: %(default)s; 2 while "
                     "another compile runs on this Mac)")
     sp.set_defaults(fn=cmd_permute)
+
+    sp = sub.add_parser("night", help="the permuter left running unattended over a list of functions (Mac or PC): "
+                        "targeted rules, then random rewrites; wins saved for `night apply`")
+    sp.add_argument("args", nargs="*", metavar="ARG", help="STAGED_PROJECT LIST.tsv; or apply RESULTS RECOVERED_REPO; "
+                    "or fetch HOST REMOTE_RESULTS")
+    sp.add_argument("--hours", type=float, help="stop after this long")
+    sp.add_argument("--until", metavar="HH:MM", help="stop at this time of day")
+    sp.add_argument("--jobs", type=int, help="compiles at once (default: 3 on the Mac, half the cores on Windows)")
+    sp.add_argument("--max-load", type=float, help="wait before a compile while the load average is above this "
+                    "(default: the cores minus 2)")
+    sp.add_argument("--results", metavar="DIR", help="the results folder (default: <SMART>/night/<project>); "
+                    "apply/fetch: where to put them")
+    sp.add_argument("--per-function-minutes", type=float, default=20, help="each function's budget per round "
+                    "(default: %(default)s)")
+    sp.add_argument("--order", choices=["big", "small"], default="big", help="biggest functions first, or smallest")
+    sp.add_argument("--seed", type=int, default=0, help="for the random rewrites")
+    sp.add_argument("--busy", metavar="NAMES", help="Windows: more process names (comma-separated) to wait for")
+    sp.add_argument("--stage", metavar="DIR", help="apply: the staged project to check in "
+                    "(default: <SMART>/msvc-stage/night-apply)")
+    sp.add_argument("--carry", metavar="CMD", help="apply: a command run in the repository after each patch "
+                    "({file} and {function} replaced), e.g. one that writes the change back into a spec")
+    sp.add_argument("--commit", action="store_true", help="apply: one commit per kept win")
+    sp.add_argument("--push", action="store_true", help="apply: push to the remote named backup at the end")
+    sp.set_defaults(fn=cmd_night)
     return p
 
 

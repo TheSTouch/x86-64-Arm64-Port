@@ -176,6 +176,19 @@ class MatchTest(unittest.TestCase):
         self.assertEqual(r.rows[2][1:], ((6, "lea rcx, [rip + <reloc>]"), (11, "lea rcx, [rip + <reloc>]")))
         self.assertIn("> " + " " * 60 + "+00006  call <reloc>  ; FGScreen::Extra", decomp.diff_listing(r))
 
+    def test_relocation_targets_tell_swapped_callees_apart(self):
+        # the same bytes either way (the relocated fields are masked); only the targets differ
+        obj = self.dir / "Screen.cpp.obj"
+        obj.write_bytes(build_obj([(CONSTRUCT, shipped_body(), [(2, 4, "__imp_ExitProcess"), (9, 4)])]))
+        self.assertEqual(decomp.match(self.dll, obj)[0].state, "matched")
+        self.assertEqual(decomp.relocation_targets(self.dll, obj, "FGScreen::Construct"), [])
+        obj.write_bytes(build_obj([(CONSTRUCT, shipped_body(), [(2, 4, CONSTRUCT), (9, 4)])]))
+        self.assertEqual(decomp.match(self.dll, obj)[0].state, "matched")
+        (off, symbol, label), = decomp.relocation_targets(self.dll, obj, CONSTRUCT)
+        self.assertEqual((off, symbol), (2, CONSTRUCT))
+        self.assertIn("ExitProcess", label)
+        self.assertIsNone(decomp.relocation_targets(self.dll, obj, "FGScreen::Missing"))
+
     @unittest.skipUnless(shutil.which("objdump"), "needs objdump (Xcode command line tools)")
     def test_matched_scores_zero_with_its_listing_too(self):
         # the lea's displacement resolved by the assembler (no relocation), the shipped one masked as
