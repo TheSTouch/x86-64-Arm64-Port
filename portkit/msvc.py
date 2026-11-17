@@ -523,7 +523,9 @@ def command_for(project, module, source_name, out_dir, hooks=False, mapper=None,
             v = wine_path(work / f"{source_name}.dep.json")
         elif o == "/FI" and Path(v.replace("\\", "/")).name.startswith("Definitions."):
             defs = work / Path(v.replace("\\", "/")).name
-            defs.write_text(patch_definitions(read_pc_text(m.mac(v)), hooks), encoding="utf-8")
+            # its line ends as they come (CRLF on the PC): never translated again, or \r\r\n is "Mac format" (C4335)
+            defs.write_text(patch_definitions(read_pc_text(m.mac(v)), hooks).replace("\r\n", "\n"), encoding="utf-8",
+                            newline="")
             v = wine_path(defs)
         elif v is not None:
             v = wine_path(m.mac(v))

@@ -198,6 +198,18 @@ class NativeTest(unittest.TestCase):
         self.assertLess(lines.index("/I D:\\night\\w0\\src"), lines.index(engine))   # searched first
         self.assertFalse(any("mirror" in line or "Z:" in line for line in lines))
 
+    def test_the_definitions_keep_one_kind_of_line_end(self):
+        # the PC's header has CRLF; written back on Windows with newline translation it became \r\r\n (C4335)
+        with tempfile.TemporaryDirectory() as tmp:
+            defs = Path(tmp) / "pc" / "Definitions.FactoryGameRecomp.h"
+            defs.parent.mkdir()
+            defs.write_bytes(b"// Generated\r\n#define RECOMP_HOOKS 1\r\n")
+            m = msvc.PathMap("D:/stage")
+            m.mac = lambda p: defs if "Definitions" in p else Path(p)
+            msvc.command_for("D:/stage", "FactoryGameRecomp", "Module.FactoryGame.1.cpp", Path(tmp) / "out", mapper=m,
+                             text=f'/c "x.cpp" /FI"{defs}"')
+            self.assertEqual((Path(tmp) / "out" / defs.name).read_bytes(), b"// Generated\n#define RECOMP_HOOKS 0\n")
+
     def test_another_compiler_is_refused(self):
         with self.assertRaises(Fail):
             msvc.check_compiler(lambda: "Microsoft (R) C/C++ Optimizing Compiler Version 19.40.33811 for x64")
