@@ -317,3 +317,19 @@ class ApplyTest(unittest.TestCase):
     def test_a_changed_function_is_stale(self):
         self.file.write_text(SOURCE.replace("Step( i );", "Step( i + 1 );"))
         self.assertTrue(self.apply()["UFoo::Tick"].startswith("stale"))
+
+
+class FetchTest(unittest.TestCase):
+    def test_the_reports_and_wins_come_back_without_the_workers(self):
+        calls = []
+
+        def runner(cmd, **kw):
+            calls.append(cmd)
+            import subprocess
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+        with tempfile.TemporaryDirectory() as tmp:
+            night.fetch("windows", "D:\\SatisfactoryRecomp\\night\\results", Path(tmp) / "pc", runner=runner)
+        self.assertIn("windows:D:/SatisfactoryRecomp/night/results/report.tsv", calls[0])
+        self.assertEqual(calls[1][:3], ["scp", "-q", "-r"])
+        self.assertTrue(calls[1][3].endswith("/wins"))
+        self.assertFalse(any("work" in part for cmd in calls for part in cmd))

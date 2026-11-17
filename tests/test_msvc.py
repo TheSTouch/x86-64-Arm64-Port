@@ -167,6 +167,44 @@ class PathMapTest(unittest.TestCase):
             self.m.mac("E:/elsewhere/x.h")
 
 
+class NativeTest(unittest.TestCase):
+    """On the Windows PC (config.MSVC_NATIVE): the PC's own cl.exe, every path as it is but the project's."""
+
+    def setUp(self):
+        saved = config.MSVC_NATIVE
+        config.MSVC_NATIVE = True
+        self.addCleanup(setattr, config, "MSVC_NATIVE", saved)
+        msvc._checked.clear()
+        self.addCleanup(msvc._checked.clear)
+        self.m = msvc.PathMap("D:/SatisfactoryRecomp/night/stage")
+
+    def test_only_the_project_moves(self):
+        self.assertEqual(self.m.mac(f"{config.PC_PROJECT}/Source/FactoryGame/Public/FGMenuBase.h"),
+                         Path("D:/SatisfactoryRecomp/night/stage/Source/FactoryGame/Public/FGMenuBase.h"))
+        self.assertEqual(self.m.mac("Runtime/Core/Public"), Path(f"{config.PC_ENGINE}/Engine/Source/Runtime/Core/Public"))
+        self.assertEqual(self.m.mac(f"{config.PC_PROJECT}/Intermediate/Build/x.h"),
+                         Path(f"{config.PC_PROJECT}/Intermediate/Build/x.h"))   # where UBT left it, not a mirror
+        self.assertEqual(self.m.mac("E:/elsewhere/x.h"), Path("E:/elsewhere/x.h"))
+        self.assertEqual(msvc.wine_path("D:/a/b.h"), "D:\\a\\b.h")
+
+    def test_the_command_line_has_pc_paths(self):
+        rsp = f'/c "{config.PC_PROJECT}/Intermediate/Module.FactoryGame.1.cpp" /I "Runtime/Core/Public" /Fo"x.obj"'
+        with tempfile.TemporaryDirectory() as tmp:
+            cmd = msvc.command_for("D:/stage", "FactoryGameRecomp", "Module.FactoryGame.1.cpp", tmp, mapper=self.m,
+                                   text=rsp, include_first=Path("D:/night/w0/src"))
+        lines = cmd.lines()
+        engine = "/I " + f"{config.PC_ENGINE}/Engine/Source/Runtime/Core/Public".replace("/", "\\")
+        self.assertIn(engine, lines)
+        self.assertLess(lines.index("/I D:\\night\\w0\\src"), lines.index(engine))   # searched first
+        self.assertFalse(any("mirror" in line or "Z:" in line for line in lines))
+
+    def test_another_compiler_is_refused(self):
+        with self.assertRaises(Fail):
+            msvc.check_compiler(lambda: "Microsoft (R) C/C++ Optimizing Compiler Version 19.40.33811 for x64")
+        msvc.check_compiler(lambda: f"Microsoft (R) C/C++ Optimizing Compiler Version {config.MSVC_BANNER} for x64")
+        self.assertEqual(msvc._checked, [config.MSVC_BANNER])
+
+
 class BlobTest(unittest.TestCase):
     def test_numbers_names_and_recovered_files(self):
         with tempfile.TemporaryDirectory() as tmp:

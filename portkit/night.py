@@ -655,6 +655,8 @@ def run(project, list_path, results, order="big", **kw):
         raise Fail(f"{project}: the runner works on a staged copy, never in the recovered-code repository or here")
     if config.inside_repository(results):
         raise Fail(f"{results} is inside this repository; results hold recovered code and stay outside it")
+    if "compiler" not in kw and not decomp.objdump():
+        raise Fail("objdump (Xcode's) or llvm-objdump (LLVM's, on Windows) not found: the scores need it")
     return Night(project, read_list(list_path, order), results, **kw).run()
 
 
@@ -787,3 +789,23 @@ def apply(results, repo, stage=None, carry=None, commit=False, push=False, log=p
         _git(repo, "push", "-q", "backup", "main")
         log("pushed to backup")
     return marks
+
+
+# ---------------------------------------------------------------------------------------------- the PC's results
+
+FETCHED = ("state.json", "report.tsv", "perf.txt", "night.log")
+
+
+def fetch(host, remote, local, runner=subprocess.run):
+    """A results folder from another machine (the PC) over scp, without its worker folders: the state, the
+    reports, the log and the wins, for `night apply` here."""
+    local = Path(local)
+    local.mkdir(parents=True, exist_ok=True)
+    remote = remote.replace("\\", "/").rstrip("/")
+    r = runner(["scp", "-q", *[f"{host}:{remote}/{name}" for name in FETCHED], str(local)], capture_output=True, text=True)
+    if r.returncode:
+        raise Fail(f"scp from {host}:{remote} failed: {r.stderr.strip()}")
+    r = runner(["scp", "-q", "-r", f"{host}:{remote}/wins", str(local)], capture_output=True, text=True)
+    if r.returncode and "No such file" not in r.stderr:
+        raise Fail(f"scp of {host}:{remote}/wins failed: {r.stderr.strip()}")
+    return local

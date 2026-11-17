@@ -463,7 +463,13 @@ def night_apply(a, results, repo):
 
 
 def night_fetch(a, host, remote):
-    raise Fail("night fetch: not written yet")
+    local = Path(a.results) if a.results else config.SMART / "night" / f"{host}-{Path(remote.replace(chr(92), '/')).name}"
+    night.fetch(host, remote, local)
+    print(f"fetched to {local}")
+    perf = local / "perf.txt"
+    if perf.is_file():
+        print(perf.read_text())
+    return 0
 
 
 def parser():

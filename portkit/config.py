@@ -96,6 +96,9 @@ SMART = Path(_setting("SMART", "/Volumes/SMART/TheSTouch"))
 # MSVC on the Mac (portkit/msvc.py): the game's compiler and SDK, copied from the owner's Windows PC (the
 # same licence and bits), run under the default runtime's Wine with a prefix of its own.
 MSVC_VERSION = _setting("MSVC_VERSION", "14.38.33130")
+MSVC_BANNER = _setting("MSVC_BANNER", "19.38.33145")   # what that toolset's cl.exe prints: Version 19.38.33145
+# On the Windows PC itself: the native cl.exe of the PC's toolchain, every PC path as it is (no Wine, no mirror).
+MSVC_NATIVE = _setting("MSVC_NATIVE", "1" if os.name == "nt" else "0") == "1"
 WINSDK_VERSION = _setting("WINSDK_VERSION", "10.0.22621.0")
 MSVC_DIR = Path(_setting("MSVC_DIR", SMART / "msvc"))            # MSVC/<version>/, sdk/Include, sdk/Lib
 MSVC_PREFIX = Path(_setting("MSVC_PREFIX", MSVC_DIR / "prefix"))

@@ -210,10 +210,14 @@ class PathMap:
     """PC paths to Mac paths: what the PC generated (an Intermediate folder) to the mirror, at its PC path;
     the project to its local staging; the engine to its Mac clone; MSVC and the SDK to their copies."""
 
-    def __init__(self, project, cwd=None, mirror=None, engine=None, msvc=None):
+    def __init__(self, project, cwd=None, mirror=None, engine=None, msvc=None, native=None):
         self.cwd = (cwd or f"{config.PC_ENGINE}/Engine/Source").replace("\\", "/")
         self.mirror = Path(mirror or config.MSVC_MIRROR) / "pc"
+        self.native = config.MSVC_NATIVE if native is None else native
         msvc = Path(msvc or config.MSVC_DIR)
+        if self.native:   # on the PC: only the project moves (to the staged copy); the rest is where it is
+            self.roots = [(config.PC_PROJECT, Path(project))]
+            return
         self.roots = sorted([
             (config.PC_PROJECT, Path(project)),
             (config.PC_ENGINE, Path(engine or config.ENGINE_DIR)),
@@ -233,6 +237,8 @@ class PathMap:
 
     def mirrored(self, path):
         p = self.pc(path)
+        if self.native:
+            return Path(p)   # what UBT generated, where it left it
         return self.mirror / p[0] / p[3:]
 
     def mac(self, path):
@@ -242,16 +248,26 @@ class PathMap:
         for prefix, local in self.roots:
             if p.lower() == prefix.lower() or p.lower().startswith(prefix.lower().rstrip("/") + "/"):
                 return local / p[len(prefix):].lstrip("/")
+        if self.native:
+            return Path(p)
         raise Fail(f"{path}: no Mac folder for this PC path (config.PC_ENGINE, PC_PROJECT, PC_MSVC, PC_WINSDK)")
 
 
 def wine_path(path):
+    """The path cl.exe is given: under Wine, the Mac path as Wine sees it; on the PC, the path itself."""
+    if config.MSVC_NATIVE:
+        return str(Path(path)).replace("/", "\\")
     return wine.windows_path(Path(path))
 
 
 # ---------------------------------------------------------------------------------------------- Wine
 
 def cl_exe():
+    if config.MSVC_NATIVE:
+        path = Path(config.PC_MSVC) / "bin" / "Hostx64" / "x64" / "cl.exe"
+        if not path.is_file() or Path(config.PC_MSVC).name != config.MSVC_VERSION:
+            raise Fail(f"{path}: not MSVC {config.MSVC_VERSION}'s cl.exe (config.PC_MSVC)")
+        return path
     path = config.MSVC_DIR / "MSVC" / config.MSVC_VERSION / "bin" / "Hostx64" / "x64" / "cl.exe"
     if not path.is_file():
         raise Fail(f"{path} not found: copy MSVC {config.MSVC_VERSION} from the PC (docs/SATISFACTORY-RECOMP.md)")
@@ -275,8 +291,41 @@ def _wineserver():
         run([runtime.wineserver_bin(config.DEFAULT_RUNTIME), "-p60"], env=_env(), stdout=null, stderr=null, check=False)
 
 
+_checked = []
+
+
+def check_compiler(banner_of=None):
+    """The compiler must be the game's: its banner says Version config.MSVC_BANNER (the 14.38.33130 toolset).
+    Checked once per process; Fail otherwise."""
+    if _checked:
+        return
+    if banner_of is None:
+        def banner_of():
+            r = subprocess.run([str(cl_exe())], capture_output=True, text=True, env=_native_env())
+            return r.stderr + r.stdout
+    text = banner_of()
+    m = re.search(r"Version (\d+\.\d+\.\d+)", text)
+    if not m or m.group(1) != config.MSVC_BANNER:
+        raise Fail(f"cl.exe is version {m.group(1) if m else '?'}, not {config.MSVC_BANNER} (MSVC {config.MSVC_VERSION}): "
+                   "objects from another compiler never match")
+    _checked.append(m.group(1))
+
+
+def _native_env():
+    env = dict(os.environ)
+    env.update({"INCLUDE": "", "LIB": "", "LIBPATH": "", "CL": "", "_CL_": ""})
+    return env
+
+
 def cl(args, cwd=None, output=None):
-    """cl.exe under Wine. Its output goes to the file `output`, else to ours."""
+    """cl.exe under Wine, or the PC's own (config.MSVC_NATIVE). Its output goes to the file `output`, else to ours."""
+    if config.MSVC_NATIVE:
+        check_compiler()
+        command, env = [str(cl_exe()), *args], _native_env()
+        if output is None:
+            return run(command, env=env, cwd=cwd, check=False)
+        with open(output, "wb") as out:
+            return run(command, env=env, cwd=cwd, check=False, stdout=out, stderr=subprocess.STDOUT)
     _wineserver()
     command = [runtime.wine_bin(config.DEFAULT_RUNTIME), wine_path(cl_exe()), *args]
     if output is None:
