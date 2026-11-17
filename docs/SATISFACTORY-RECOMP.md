@@ -444,6 +444,50 @@ staged one and broke every candidate, so those runs found nothing.
 Still to do: 3 (a decompiler draft), 4 (skeletons from the PDB), 5 (systematic differences fixed once) and 13 (stubs
 that log, with the native milestones).
 
+## The night runner: `./port night` (2026-11-17, batch "Night")
+
+The permuter left running with nobody watching, on the Mac or on the Windows PC, over a list of functions that are
+written but differ (any tsv with blob, file, function and bytes columns; engine-drift rows are skipped):
+
+    ./port night <staged project> <list.tsv> [--hours N | --until HH:MM] [--jobs N] [--max-load L] [--results DIR]
+    ./port night apply <results> <recovered repo> [--carry CMD] [--commit] [--push]
+    ./port night fetch windows <PC results folder>
+
+- **What it tries**, per function, biggest first (`--order small` for the reverse): the targeted rules first, in turn,
+  one candidate per place each fits (C-14: members named in a constructor's init list in declaration order, body
+  assignments moved in or out, `mX()` value-initialization; `FName( "X" )` <-> `"X"`; an explicit `FString`
+  temporary <-> the literal; a range-for variable by reference <-> by value; a counter's type; a declaration moved
+  up to four statements; a test hoisted into a local or a local inlined; every swap of `||`/`&&` terms, of
+  side-effect-free arguments, of simple statements; then each distinct candidate of the random rules), then random
+  rewrites of the five best candidates until its budget (`--per-function-minutes`, 20) is spent. An improvement
+  becomes the base and the targeted rules run again from it. When the list is done it goes round again with new
+  seeds, until the time is up or a whole round has nothing new to compile. A rewritten function keeps its number of
+  lines (blank lines given back or added beside the change), so a laid-out file stays on its PDB lines.
+- **A win** is a candidate whose function matches, whose relocations each reach what the shipped code's does
+  (matching masks the relocated bytes, so two calls swapped would "match"; `decomp.relocation_targets`), and in
+  whose object every function of the blob that matched in the baseline still matches. "Equivalent" is never a win.
+  Wins are saved in `results/wins/` (old and new definition, rule chain, time) and reach the recovered code only
+  through `night apply`, which patches the file, runs `--carry` (the recovered-code repository's
+  `work/helpers/cpp2spec.py` writes the change back into the spec), restages, matches the blob for real and keeps
+  the change only if all three conditions still hold; one commit per win with `--commit` (as
+  `config.COMMIT_EMAIL` only), pushed to `backup` only with `--push`.
+- **Resume, STOP**: `results/state.json` is written after every batch; the same command goes on where it was, after a
+  sleep, a crash or Ctrl-C. A file named `STOP` in the results folder makes it finish the compiles in flight and
+  exit; the next start removes it.
+- **Polite**: nice 19 on the Mac (below normal on Windows); before each compile it waits while the load average,
+  minus its own compiles, is over `--max-load` (cores - 2), and on the PC while the game, UBT or an editor runs
+  (read only). Jobs: 3 on the Mac, cores/2 on the PC. It writes only in its results folder and worker folders.
+- **Reports**: `results/report.tsv` (one line per function: start and best score, won/closer/no, candidates,
+  compiles, minutes, the rule chain) and `results/perf.txt` every five minutes (compiles per hour, seconds per
+  compile, wins per hour in functions and KB).
+- **On the PC** (C-17): `config.MSVC_NATIVE` uses the PC's own cl.exe and every path where it is (only the project
+  moves to the staged copy), and refuses a compiler whose banner is not 19.38.33145. The launcher, the stop file
+  and the setup live in the recovered-code repository (`Project/night/`, `work/helpers/night-pc-setup.sh`).
+
+Also from this batch: `./port msvc try <project> <File.cpp> <variants...>` compiles up to `--jobs` whole-file
+variants at once, one line per variant; `./port decomp --match OBJ --diff NAME --brief` prints the score, the calls
+made on one side only and the first differing region alone (at most 30 lines).
+
 ## Recovery by someone else, without AI
 
 The matcher makes it possible: a function is right when it reproduces the shipped bytes, and that takes no

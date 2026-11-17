@@ -17,7 +17,8 @@ source; `./port msvc match` compares each compiled function with the shipped one
 only an exact match counts. A hook DLL (`windows/recomp-hooks`) then replaces the shipped functions by the matched
 ones in the running game on Windows, and a trace mode logs which functions a milestone needs (for Satisfactory: the
 main menu and every menu screen). Recovery runs in parallel AI sessions, one unity blob each, with a coordinator that
-builds and play-tests on the PC.
+builds and play-tests on the PC. What is written but still differs can be left to `./port night`, which tries
+the rewrites sessions found by hand and random ones, unattended, and keeps only verified matches.
 
 ## What a game needs
 
