@@ -474,9 +474,11 @@ written but differ (any tsv with blob, file, function and bytes columns; engine-
 - **Resume, STOP**: `results/state.json` is written after every batch; the same command goes on where it was, after a
   sleep, a crash or Ctrl-C. A file named `STOP` in the results folder makes it finish the compiles in flight and
   exit; the next start removes it.
-- **Polite**: nice 19 on the Mac (below normal on Windows); before each compile it waits while the load average,
-  minus its own compiles, is over `--max-load` (cores - 2), and on the PC while the game, UBT or an editor runs
-  (read only). Jobs: 3 on the Mac, cores/2 on the PC. It writes only in its results folder and worker folders.
+- **Polite**: nice 19 on the Mac (below normal on Windows); it starts a compile only while one more fits under
+  `--max-load` busy cores (cores - 2), its own compiles counted (busy cores now: top's idle figure on the Mac, the
+  processors' use on the PC), so it grows into the room the machine leaves and shrinks when the machine is used,
+  up to `--jobs` (cores/2) at once; and on the PC it waits while the game, UBT or an editor runs (read only). It
+  writes only in its results folder and worker folders.
 - **Reports**: `results/report.tsv` (one line per function: start and best score, won/closer/no, candidates,
   compiles, minutes, the rule chain) and `results/perf.txt` every five minutes (compiles per hour, seconds per
   compile, wins per hour in functions and KB).

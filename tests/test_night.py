@@ -206,15 +206,22 @@ class NightTest(unittest.TestCase):
         machine = Machine(loads=[9.0, 9.0, 9.0, 1.0])
         n, compiler = self.night(machine=machine, hours=0.05)
         n.run()
-        self.assertTrue(any("waiting: load 9.0 > 4.0" in line for line in self.logs))
+        self.assertTrue(any("waiting: busy 9.0 of 4.0 cores" in line for line in self.logs))
         self.assertTrue(any("going on" in line for line in self.logs))
         self.assertGreaterEqual(json.loads((self.results / "state.json").read_text())["waited"], 90)
 
-    def test_its_own_compiles_are_no_reason_to_wait(self):
-        n, _ = self.night(machine=Machine(loads=[5.5] * 50), hours=0.05)
-        n.inflight = 2   # two of its compiles running: 5.5 - 2 is under 4
+    def test_it_starts_a_compile_only_while_there_is_room_for_it(self):
+        # C-21 (deliberately replaces C-18's test): its own compiles count in the busy cores, so it grows into the
+        # room left and shrinks when the machine is used. 2.5 busy of 4: room for one more.
+        n, _ = self.night(machine=Machine(loads=[2.5] * 50), hours=0.05)
         n.wait_for_room()
         self.assertFalse(any("waiting" in line for line in self.logs))
+        # 3.5 busy of 4 (say two of its compiles and someone's build): no room, it waits until a core frees up
+        n2, _ = self.night(machine=Machine(loads=[3.5, 3.5, 2.0]), hours=0.05)
+        n2.inflight = 2
+        n2.wait_for_room()
+        self.assertTrue(any("waiting: busy 3.5 of 4.0 cores (2 of them its own compiles)" in line for line in self.logs))
+        self.assertTrue(any("going on" in line for line in self.logs))
 
     def test_a_match_that_breaks_another_function_is_no_win(self):
         compiler = FakeCompiler(self.project, self.clock, lose="Other::Fine")

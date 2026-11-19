@@ -107,15 +107,23 @@ class Machine:
         return f"{platform.system()} {platform.release()}, {self.cores} cores"
 
     def default_jobs(self):
-        return max(1, self.cores // 2) if WINDOWS else 3
+        return max(1, self.cores // 2)
 
     def default_max_load(self):
         return max(1.0, self.cores - 2.0)
 
     def load(self):
-        """The one-minute load average; on Windows the processors' use as the same scale (100 % = cores)."""
+        """How many cores are busy now, its own compiles included: the processors' use (100 % = all the cores). On
+        the Mac from top's idle figure (the load average lags a minute and counts waiting threads), falling back to
+        the load average when top gives nothing."""
         if not WINDOWS:
-            return os.getloadavg()[0]
+            try:
+                out = subprocess.run(["top", "-l", "2", "-n", "0", "-s", "1"], capture_output=True, text=True,
+                                     timeout=30).stdout
+                idle = re.findall(r"CPU usage:.*?([\d.]+)% idle", out)
+                return (100 - float(idle[-1])) / 100 * self.cores
+            except (OSError, ValueError, IndexError, subprocess.SubprocessError):
+                return os.getloadavg()[0]
         try:
             out = subprocess.run(["powershell", "-NoProfile", "-Command",
                                   "(Get-CimInstance Win32_Processor | Measure-Object -Property LoadPercentage -Average).Average"],
@@ -300,16 +308,18 @@ class Night:
         return self.deadline is not None and self.clock() >= self.deadline
 
     def wait_for_room(self):
-        """Before a compile: wait while the load is over max_load or something that needs the machine runs."""
+        """Before a compile: wait while one more compile would take the machine over max_load busy cores (its own
+        compiles count: with room for two it runs two, with none it runs none, up to its jobs), or while something
+        that needs the machine runs."""
         with self.wait_lock:
             said = None
             while not self.stopping():
                 why = self.machine.busy()
-                load = self.machine.load() - self.inflight   # its own compiles are not a reason to wait
-                if why is None and load <= self.max_load:
+                load = self.machine.load()
+                if why is None and load + 1 <= self.max_load:
                     break
-                reason = f"{why} is running" if why else f"load {load:.1f} > {self.max_load:.1f} (its own " \
-                    f"{self.inflight} compiles left out)"
+                reason = f"{why} is running" if why else f"busy {load:.1f} of {self.max_load:.1f} cores " \
+                    f"({self.inflight} of them its own compiles): no room for one more"
                 if reason.split(" ")[0] != (said or "").split(" ")[0]:
                     self.log(f"waiting: {reason}")
                     said = reason
