@@ -646,9 +646,10 @@ def parser():
                     "or fetch HOST REMOTE_RESULTS")
     sp.add_argument("--hours", type=float, help="stop after this long")
     sp.add_argument("--until", metavar="HH:MM", help="stop at this time of day")
-    sp.add_argument("--jobs", type=int, help="most compiles at once (default: half the cores)")
+    sp.add_argument("--jobs", type=int, help="most compiles at once (default: 2 on the Mac, half the cores on the PC)")
     sp.add_argument("--max-load", type=float, help="start a compile only while one more keeps the busy cores, its "
-                    "own compiles counted, at or under this (default: the cores minus 2)")
+                    "own compiles counted, at or under this (default: 60%% of the cores on the Mac, the cores "
+                    "minus 2 on the PC)")
     sp.add_argument("--results", metavar="DIR", help="the results folder (default: <SMART>/night/<project>); "
                     "apply/fetch: where to put them")
     sp.add_argument("--per-function-minutes", type=float, default=20, help="each function's budget per round "

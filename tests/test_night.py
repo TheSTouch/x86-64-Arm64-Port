@@ -339,6 +339,43 @@ class NightTest(unittest.TestCase):
         self.assertTrue(any("waiting: busy 3.5 of 4.0 cores (2 of them its own compiles)" in line for line in self.logs))
         self.assertTrue(any("going on" in line for line in self.logs))
 
+    def test_on_a_mac_whose_top_does_not_answer_the_machine_counts_as_full(self):
+        # A-4: the Mac rebooted while top timed out and the runner read the load average (17.6 of 8 on 10 cores)
+        import subprocess
+        from unittest import mock
+        mac = night.Machine(cores=10, system="darwin")
+        for failure in (subprocess.TimeoutExpired(["top"], 30), OSError("no top")):
+            with mock.patch.object(night.subprocess, "run", side_effect=failure), \
+                    mock.patch.object(night.os, "getloadavg", return_value=(17.6, 9.0, 5.0)):
+                self.assertEqual(mac.load(), 10.0)
+                self.assertIn("top", mac.unknown)
+        idle = subprocess.CompletedProcess(["top"], 0, "CPU usage: 10.0% user, 10.0% sys, 80.0% idle\n" * 2, "")
+        with mock.patch.object(night.subprocess, "run", return_value=idle):
+            self.assertAlmostEqual(mac.load(), 2.0)
+            self.assertIsNone(mac.unknown)
+        # never more busy cores than cores (the load average elsewhere)
+        with mock.patch.object(night.os, "getloadavg", return_value=(17.6, 9.0, 5.0)):
+            self.assertEqual(night.Machine(cores=8, system="linux").load(), 8.0)
+        # the runner waits while the load is unknown, and goes on once top answers
+        calls = iter([subprocess.TimeoutExpired(["top"], 30), subprocess.TimeoutExpired(["top"], 30), idle, idle])
+
+        def run(*a, **kw):
+            r = next(calls)
+            if isinstance(r, Exception):
+                raise r
+            return r
+        with mock.patch.object(night.subprocess, "run", side_effect=run):
+            n, _ = self.night(machine=mac, hours=0.05)
+            n.wait_for_room()
+        self.assertTrue(any("waiting: the load is unknown (top did not answer" in line for line in self.logs), self.logs)
+        self.assertTrue(any("going on" in line for line in self.logs))
+        self.assertGreaterEqual(json.loads((self.results / "state.json").read_text())["waited"], 60)
+
+    def test_the_mac_s_defaults_leave_it_room(self):
+        mac, pc = night.Machine(cores=10, system="darwin"), night.Machine(cores=8, system="windows")
+        self.assertEqual((mac.default_jobs(), mac.default_max_load()), (2, 6.0))
+        self.assertEqual((pc.default_jobs(), pc.default_max_load()), (4, 6.0))
+
     def test_a_match_that_breaks_another_function_is_no_win(self):
         compiler = FakeCompiler(self.project, self.clock, lose="Other::Fine")
         n, _ = self.night(compiler=compiler, hours=0.2)

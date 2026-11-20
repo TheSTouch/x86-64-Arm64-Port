@@ -102,49 +102,62 @@ def read_list(path, order="big"):
 
 class Machine:
     """What the runner asks of the machine it runs on: its load, whether something else needs it, how to be
-    polite. Read only."""
+    polite. Read only. `system` (windows, darwin, or another) and `cores` stand in for this machine's in tests."""
 
-    def __init__(self, busy=()):
-        self.cores = os.cpu_count() or 4
+    def __init__(self, busy=(), cores=None, system=None):
+        self.cores = cores or os.cpu_count() or 4
+        self.system = system or ("windows" if WINDOWS else sys.platform)
         self.busy_names = {n.lower() for n in BUSY_PROCESSES + tuple(busy)}
+        self.unknown = None   # why the last load() could not be read (then it said: every core busy)
 
     @property
     def name(self):
-        if WINDOWS:
+        if self.system == "windows":
             return f"Windows {platform.release()}, {self.cores} cores, native cl.exe"
-        if sys.platform == "darwin":
+        if self.system == "darwin":
             return f"Mac (macOS {platform.mac_ver()[0]}), {self.cores} cores, cl.exe under Wine"
         return f"{platform.system()} {platform.release()}, {self.cores} cores"
 
     def default_jobs(self):
-        return max(1, self.cores // 2)
+        """The Mac: 2 (it is also the owner's machine, and Wine's compiles weigh on it); the PC: half the cores."""
+        return 2 if self.system == "darwin" else max(1, self.cores // 2)
 
     def default_max_load(self):
+        """The Mac: 60 % of the cores (6 of 10); the PC: the cores minus 2."""
+        if self.system == "darwin":
+            return max(1.0, round(self.cores * 0.6, 1))
         return max(1.0, self.cores - 2.0)
 
     def load(self):
-        """How many cores are busy now, its own compiles included: the processors' use (100 % = all the cores). On
-        the Mac from top's idle figure (the load average lags a minute and counts waiting threads), falling back to
-        the load average when top gives nothing."""
-        if not WINDOWS:
+        """How many cores are busy now, its own compiles included: the processors' use (100 % = all the cores),
+        never more than the cores. On the Mac from top's idle figure (the load average lags a minute and counts
+        waiting threads); when top fails or does not answer, the machine is that loaded: every core counts as
+        busy (the runner waits). Elsewhere but Windows, the load average."""
+        self.unknown = None
+        if self.system == "darwin":
             try:
                 out = subprocess.run(["top", "-l", "2", "-n", "0", "-s", "1"], capture_output=True, text=True,
                                      timeout=30).stdout
                 idle = re.findall(r"CPU usage:.*?([\d.]+)% idle", out)
-                return (100 - float(idle[-1])) / 100 * self.cores
-            except (OSError, ValueError, IndexError, subprocess.SubprocessError):
-                return os.getloadavg()[0]
+                return min(self.cores, (100 - float(idle[-1])) / 100 * self.cores)
+            except subprocess.TimeoutExpired:
+                self.unknown = "top did not answer in 30 s"
+            except (OSError, ValueError, IndexError, subprocess.SubprocessError) as e:
+                self.unknown = f"top failed: {e or type(e).__name__}"
+            return float(self.cores)
+        if self.system != "windows":
+            return min(float(self.cores), os.getloadavg()[0])
         try:
             out = subprocess.run(["powershell", "-NoProfile", "-Command",
                                   "(Get-CimInstance Win32_Processor | Measure-Object -Property LoadPercentage -Average).Average"],
                                  capture_output=True, text=True, timeout=60).stdout.strip()
-            return float(out.replace(",", ".")) / 100 * self.cores
+            return min(self.cores, float(out.replace(",", ".")) / 100 * self.cores)
         except (OSError, ValueError, subprocess.SubprocessError):
             return 0.0
 
     def busy(self):
         """The name of a running program that needs the machine (the game, a build), or None. Windows only."""
-        if not WINDOWS:
+        if self.system != "windows":
             return None
         try:
             out = subprocess.run(["tasklist", "/FO", "CSV", "/NH"], capture_output=True, text=True, timeout=60).stdout
@@ -357,7 +370,9 @@ class Night:
                 load = self.machine.load()
                 if why is None and load + 1 <= self.max_load:
                     break
-                reason = f"{why} is running" if why else f"busy {load:.1f} of {self.max_load:.1f} cores " \
+                unknown = getattr(self.machine, "unknown", None)
+                reason = f"{why} is running" if why else f"the load is unknown ({unknown}): counted as full" \
+                    if unknown else f"busy {load:.1f} of {self.max_load:.1f} cores " \
                     f"({self.inflight} of them its own compiles): no room for one more"
                 if reason.split(" ")[0] != (said or "").split(" ")[0]:
                     self.log(f"waiting: {reason}")
