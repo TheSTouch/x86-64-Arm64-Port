@@ -71,7 +71,7 @@ class RewriteTest(unittest.TestCase):
     def test_invert_an_early_return(self):
         split = permute.r_split_if_init(body_of("UFoo::GetBar"), self.rng)
         inverted = permute.r_invert_early_return(split, self.rng)
-        self.assertIn("if( !( world ) ) { return nullptr; }\n\treturn Cast< UBar >( world->GetInstance() );", inverted)
+        self.assertIn("if( !world ) { return nullptr; }\n\treturn Cast< UBar >( world->GetInstance() );", inverted)
 
     def test_introduce_and_remove_a_temporary(self):
         body = body_of("UFoo::GetLimit")
@@ -91,7 +91,7 @@ class RewriteTest(unittest.TestCase):
 
     def test_swap_if_and_else(self):
         swapped = permute.r_swap_if_else(body_of("UFoo::Tick"), self.rng)
-        self.assertIn("if( !( mReady ) )\n\t{\n\t\tWait();\n\t}\n\telse\n\t{\n\t\tGo();\n\t}", swapped)
+        self.assertIn("if( !mReady )\n\t{\n\t\tWait();\n\t}\n\telse\n\t{\n\t\tGo();\n\t}", swapped)
 
     def test_casts_and_const(self):
         cast = permute.r_cast(body_of("UFoo::GetLimit"), random.Random(0))

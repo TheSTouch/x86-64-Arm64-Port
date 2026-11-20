@@ -235,6 +235,61 @@ def r_split_if_init(body, rng):
     return None
 
 
+def _top_level(text, token):
+    """Offsets of `token` in text outside brackets and strings."""
+    out, depth, i, quote = [], 0, 0, None
+    while i < len(text):
+        c = text[i]
+        if quote:
+            if c == "\\":
+                i += 2
+                continue
+            if c == quote:
+                quote = None
+        elif c in "\"'":
+            quote = c
+        elif c in "([{":
+            depth += 1
+        elif c in ")]}":
+            depth -= 1
+        elif depth == 0 and text.startswith(token, i):
+            out.append(i)
+        i += 1
+    return out
+
+
+def _whole_operand(text):
+    """Whether text (trimmed) is one operand: a name chain with its calls and subscripts, or a bracketed
+    expression."""
+    text = text.strip()
+    try:
+        return bool(text) and _operand_end(text, 0) == len(text)
+    except Fail:
+        return False
+
+
+def negate(cond):
+    """The condition negated, written as a person would: !x -> x, !( a ) -> a, a == b <-> a != b, x -> !x,
+    anything else !( ... ). No double negation, so a rewritten function that matches reads as clean code."""
+    cond = cond.strip()
+    if cond.startswith("!") and not cond.startswith("!=") and _whole_operand(cond[1:]):
+        inner = cond[1:].strip()
+        if inner.startswith("(") and _match_close(inner, 0) == len(inner) - 1:
+            inner = inner[1:-1].strip()
+        return inner
+    if _whole_operand(cond):
+        if cond.startswith("(") and _match_close(cond, 0) == len(cond) - 1:
+            return negate(cond[1:-1])
+        return f"!{cond}"
+    if not any(_top_level(cond, t) for t in ("&&", "||", "?", "<", ">")):
+        equals = len(_top_level(cond, "="))
+        for op, other, n in ((" == ", " != ", 2), (" != ", " == ", 1)):
+            at = _top_level(cond, op)
+            if len(at) == 1 and equals == n:
+                return cond[:at[0]] + other + cond[at[0] + len(op):]
+    return f"!( {cond} )"
+
+
 def r_invert_early_return(body, rng):
     """if( c ) { return a; } return b;  ->  if( !( c ) ) { return b; } return a;"""
     m = re.search(r"\bif\(", body)
@@ -248,7 +303,7 @@ def r_invert_early_return(body, rng):
     t = re.match(r"\s*\{\s*(return[^;]*;)\s*\}\s*(return[^;]*;)", rest) or re.match(r"\s*(return[^;]*;)\s*(return[^;]*;)", rest)
     if not t:
         return None
-    neg = cond[1:].strip() if cond.startswith("!") and "(" not in cond[1:2] and " " not in cond[1:].strip() else f"!( {cond} )"
+    neg = negate(cond)
     end = close + 1 + t.end()
     return body[:m.start()] + f"if( {neg} ) {{ {t.group(2)} }}\n\t{t.group(1)}" + body[end:]
 
@@ -268,7 +323,7 @@ def r_swap_if_else(body, rng):
         b2 = e1 + 1 + em.end() - 1
         e2 = _match_close(body, b2, "{", "}")
         cond = body[m.end():close].strip()
-        return (body[:m.start()] + f"if( !( {cond} ) )" + body[close + 1:b1] + body[b2:e2 + 1]
+        return (body[:m.start()] + f"if( {negate(cond)} )" + body[close + 1:b1] + body[b2:e2 + 1]
                 + body[e1 + 1:b2] + body[b1:e1 + 1] + body[e2 + 1:])
     return None
 
@@ -328,6 +383,7 @@ def r_const(body, rng):
 
 COMMUTATIVE = (" == ", " != ", " + ", " * ", " & ", " | ", " ^ ")
 LEFT_EDGE = re.compile(r"(?:[(,=?:]|\breturn|&&|\|\|)\s*$")
+FOR_EDGE = re.compile(r"(?:[(,=?:;]|\breturn|&&|\|\|)\s*$")   # LEFT_EDGE and a for loop's condition
 RIGHT_EDGE = re.compile(r"\s*(?:[),;?:]|&&|\|\|)")
 
 
@@ -348,24 +404,38 @@ def _operand_end(text, i):
     return j
 
 
-def r_swap_operands(body, rng):
-    """a == b -> b == a, and the same for != + * & | ^: only where the expression is a whole operand of its
-    own (between brackets, commas, =, return, && or ||), so precedence keeps its meaning."""
+def _operand_pairs(body, ops, left_edge=LEFT_EDGE):
+    """(l0, k, r0, r1, op) for each `left op right` of body whose two sides are whole operands and whose
+    expression is a whole operand of its own (between brackets, commas, =, return, && or ||)."""
     options = []
-    for op in COMMUTATIVE:
+    for op in ops:
         for m in re.finditer(re.escape(op), body):
             k, r0 = m.start(), m.end()
-            r1 = _operand_end(body, r0)
+            try:
+                r1 = _operand_end(body, r0)
+            except Fail:
+                continue
             if r1 is None or not RIGHT_EDGE.match(body, r1):
                 continue
             for l0 in range(k - 1, max(k - 200, 0), -1):
-                if (l0 == 0 or not re.match(r"[\w.>:]", body[l0 - 1])) and _operand_end(body, l0) == k:
-                    if LEFT_EDGE.search(body[:l0]):
-                        options.append((l0, k, r0, r1))
+                try:
+                    whole = (l0 == 0 or not re.match(r"[\w.>:]", body[l0 - 1])) and _operand_end(body, l0) == k
+                except Fail:
+                    whole = False
+                if whole:
+                    if left_edge.search(body[:l0]):
+                        options.append((l0, k, r0, r1, op))
                     break
+    return options
+
+
+def r_swap_operands(body, rng):
+    """a == b -> b == a, and the same for != + * & | ^: only where the expression is a whole operand of its
+    own (between brackets, commas, =, return, && or ||), so precedence keeps its meaning."""
+    options = _operand_pairs(body, COMMUTATIVE)
     if not options:
         return None
-    l0, k, r0, r1 = rng.choice(options)
+    l0, k, r0, r1, _ = rng.choice(options)
     return body[:l0] + body[r0:r1] + body[k:r0] + body[l0:k] + body[r1:]
 
 
@@ -1045,6 +1115,439 @@ def t_swap_statements(definition, members=None):
     return out
 
 
+# ---- Night-9: rules from the night runner's first 42 hours (its wins and what was left)
+
+PURE_CALLS = {"TEXT", "StaticClass", "FName", "FVector", "FVector2D", "FRotator", "FLinearColor", "FColor", "FIntPoint",
+              "FQuat", "FTransform", "GetDefault", "sizeof"}
+CHAIN = rf"(?:{IDENT}(?:->|\.|::))*{IDENT}"
+
+
+def _chains(text):
+    """Every name chain in text (a, a.b, a->b, A::b), split into its names."""
+    return [re.split(r"->|\.|::", m.group(0)) for m in re.finditer(rf"(?<![\w>.:]){CHAIN}", text)]
+
+
+def _assigned(statement):
+    """The names of the chain a simple statement assigns or increments (a.b = v; ++a.b; a.b += v), or None."""
+    m = re.match(rf"\s*(?:\+\+|--)?\s*({CHAIN})\s*(?:[-+*/%&|^]?=(?!=)|\+\+|--)", statement)
+    return re.split(r"->|\.|::", m.group(1)) if m else None
+
+
+def _effects(statement):
+    """Whether a statement calls something that may have side effects (anything but PURE_CALLS)."""
+    for c0, c1 in _calls(statement):
+        name = re.match(rf"(?:{IDENT}(?:->|\.|::))*({IDENT})", statement[c0:]).group(1)
+        if name not in PURE_CALLS:
+            return True
+    return bool(re.search(r"\bnew\b|\bdelete\b", statement))
+
+
+def _prefix(a, b):
+    return a[:len(b)] == b or b[:len(a)] == a
+
+
+def _commute(s1, s2):
+    """Whether two simple statements can change places without changing what the function does: neither
+    declares a name the other uses, at most one calls anything with side effects, and neither assigns a chain
+    the other names (a.b and a.c are apart; a and a.b are not)."""
+    if any(n and re.search(rf"\b{n}\b", other) for n, other in ((_declared(s1), s2), (_declared(s2), s1))):
+        return False
+    if _effects(s1) and _effects(s2):
+        return False
+    for mine, other in ((s1, s2), (s2, s1)):
+        w = _assigned(mine)
+        if w is None and not _declared(mine) and not _effects(mine):
+            return False   # a statement of another kind: left in place
+        if w and any(_prefix(w, c) for c in _chains(other)):
+            return False
+    return True
+
+
+def _simple_statements(block):
+    """(start, end) of a block's statements that are neither control flow nor compound."""
+    return [(a, b) for a, b in statements(block)
+            if not re.match(r"(return|if|for|while|switch|do|break|continue|case|default|goto|else)\b", block[a:b])
+            and "{" not in block[a:b] and "//" not in block[a:b] and "/*" not in block[a:b]]
+
+
+def _reorder(block, sts, order):
+    """block with the statements at spans sts put in `order` (a permutation of their indices), each slot keeping
+    the text between statements, so the layout (lines, two statements on one line) stays."""
+    out, last = block[:sts[0][0]], sts[0][0]
+    for i, (a, b) in enumerate(sts):
+        out += block[last:a] if i else ""
+        x, y = sts[order[i]]
+        out += block[x:y]
+        last = b
+    return out + block[sts[-1][1]:]
+
+
+MOVE_CAP = 60   # candidates of t_move_statement per definition
+
+
+def t_move_statement(definition, members=None):
+    """A simple statement moved two to MOVE_REACH places up or down its run of neighbouring simple statements
+    (one place is t_swap_statements), across statements it commutes with only (_commute). The night runner's
+    constructor wins moved a store past two others in two steps; this is one."""
+    d = Definition(definition)
+    out = []
+    for b0 in _blocks(definition, d.body_start):
+        try:
+            block = definition[b0:_match_close(definition, b0, "{", "}") + 1]
+        except Fail:
+            continue
+        sts = _simple_statements(block)
+        runs, run = [], []
+        for st in sts:   # runs of neighbours: nothing but blank space between them
+            if run and block[run[-1][1]:st[0]].strip():
+                runs.append(run)
+                run = []
+            run.append(st)
+        runs.append(run)
+        for run in runs:
+            texts = [block[a:b] for a, b in run]
+            for k in range(len(run)):
+                for direction in (-1, 1):
+                    j = k
+                    while 0 <= j + direction < len(run) and abs(j + direction - k) <= MOVE_REACH:
+                        if not _commute(texts[k], texts[j + direction]):
+                            break
+                        j += direction
+                        if abs(j - k) < 2:
+                            continue
+                        order = list(range(len(run)))
+                        order.remove(k)
+                        order.insert(j, k)
+                        out.append(definition[:b0] + _reorder(block, run, order) + definition[b0 + len(block):])
+                        if len(out) >= MOVE_CAP:
+                            return out
+    return out
+
+
+def t_store_order(definition, members=None):
+    """A constructor's run of body assignments put in the order the members are laid out: what the class
+    inherits first (as written), then its own members as the header declares them; and the inherited ones
+    first alone. Only where every pair that changes places commutes (_commute). Six of the night runner's
+    first eleven wins were constructors whose stores came in this order (NetDormancy, an AActor member,
+    before the class's own)."""
+    d = Definition(definition)
+    if not d.constructor or not members:
+        return []
+    own = {m.name: k for k, m in enumerate(members)}
+    out = []
+    block = d.body
+    sts = _simple_statements(block)
+    runs, run = [], []
+    for st in sts:   # stretches of neighbouring assignments: a comment, a call or a declaration ends one
+        if run and (block[run[-1][1]:st[0]].strip() or not _assigned(block[st[0]:st[1]])):
+            runs.append(run)
+            run = []
+        if _assigned(block[st[0]:st[1]]):
+            run.append(st)
+    runs.append(run)
+    for run in runs:
+        texts = [block[a:b] for a, b in run]
+        roots = [_assigned(t)[0] for t in texts]
+        if len(run) < 2:
+            continue
+        keys = [(0, k) if r not in own else (1, own[r], k) for k, r in enumerate(roots)]
+        inherited = [(0 if r not in own else 1, k) for k, r in enumerate(roots)]
+        for key in (keys, inherited):
+            order = sorted(range(len(run)), key=lambda i: key[i])
+            if order == list(range(len(run))):
+                continue
+            pos = {i: p for p, i in enumerate(order)}
+            if any(pos[i] > pos[j] and not _commute(texts[i], texts[j])
+                   for i in range(len(run)) for j in range(i + 1, len(run))):
+                continue
+            new = definition[:d.body_start] + _reorder(block, run, order)
+            if new not in out:
+                out.append(new)
+    return out
+
+
+def t_empty_test(definition, members=None):
+    """A container's emptiness tested another way: !x.IsEmpty() <-> x.Num() > 0 <-> x.Num() != 0, and
+    x.IsEmpty() <-> x.Num() == 0 (Len() for a chain the function measures with Len)."""
+    start = _after_head(definition)
+    out = []
+    pat = re.compile(rf"(!\s*)?({CHAIN})(->|\.)(IsEmpty|Num|Len)\(\s*\)(\s*(?:>|!=|==)\s*0\b(?!\.))?")
+    for m in pat.finditer(definition):
+        if m.start() < start:
+            continue
+        neg, x, dot, method, cmp = m.group(1), m.group(2), m.group(3), m.group(4), (m.group(5) or "").strip()
+        size = "Len" if method == "Len" or re.search(rf"\b{re.escape(x)}\s*{re.escape(dot)}Len\(", definition) else "Num"
+        if method == "IsEmpty":
+            if cmp:
+                continue
+            forms = [f"{x}{dot}{size}() > 0", f"{x}{dot}{size}() != 0"] if neg else [f"{x}{dot}{size}() == 0"]
+        elif neg or not cmp:
+            continue
+        elif cmp.startswith("=="):
+            forms = [f"{x}{dot}IsEmpty()"]
+        else:
+            forms = [f"!{x}{dot}IsEmpty()", f"{x}{dot}{method}() {'!=' if cmp.startswith('>') else '>'} 0"]
+        for form in forms:
+            out.append(definition[:m.start()] + form + definition[m.end():])
+    return out
+
+
+def t_null_test(definition, members=None):
+    """A pointer test written another way, in an if, a while or one of their && / || terms: p <-> p != nullptr,
+    !p <-> p == nullptr. (IsValid( p ) is not among them: it also tests the object's garbage flag.)"""
+    out = []
+    for m in re.finditer(r"\b(?:if|while)\(", definition):
+        close = _match_close(definition, m.end() - 1)
+        a = m.end()
+        cond = definition[a:close]
+        cuts = sorted([0, len(cond)] + [i for t in ("&&", "||") for i in _top_level(cond, t)])
+        for x, y in zip(cuts, cuts[1:]):
+            x += 2 if cond.startswith(("&&", "||"), x) else 0
+            term = cond[x:y]
+            t = term.strip()
+            lead, trail = term[:len(term) - len(term.lstrip())], term[len(term.rstrip()):]
+            if n := re.fullmatch(rf"({CHAIN}) != nullptr", t):
+                new = n.group(1)
+            elif n := re.fullmatch(rf"({CHAIN}) == nullptr", t):
+                new = f"!{n.group(1)}"
+            elif n := re.fullmatch(rf"!\s*({CHAIN})", t):
+                new = f"{n.group(1)} == nullptr"
+            elif re.fullmatch(CHAIN, t) and not re.match(r"b[A-Z]|true$|false$", t.split(".")[-1].split("->")[-1]):
+                new = f"{t} != nullptr"
+            else:
+                continue
+            out.append(definition[:a + x] + lead + new + trail + definition[a + y:])
+    return out
+
+
+def t_increment(definition, members=None):
+    """++i <-> i++ (and --) where the value is not used: a for loop's step or a statement of its own; and
+    i += 1 -> ++i."""
+    start = _after_head(definition)
+    out = []
+    for m in re.finditer(rf"(?:(?<=;)|(?<=;\s)|(?m:^)[ \t]*)(\+\+|--)({CHAIN})(?=\s*[;)])|(?:(?<=;)|(?<=;\s)|(?m:^)[ \t]*)({CHAIN})(\+\+|--)(?=\s*[;)])", definition):
+        if m.start() < start:
+            continue
+        lead = re.match(r"[ \t]*", m.group(0)).group(0)
+        new = f"{m.group(2)}{m.group(1)}" if m.group(1) else f"{m.group(4)}{m.group(3)}"
+        out.append(definition[:m.start()] + lead + new + definition[m.end():])
+    for m in re.finditer(rf"(?:(?<=;\s)|(?m:^)[ \t]*)({CHAIN}) ([-+])= 1(?=\s*[;)])", definition):
+        if m.start() >= start:
+            lead = re.match(r"[ \t]*", m.group(0)).group(0)
+            out.append(definition[:m.start()] + lead + f"{m.group(2) * 2}{m.group(1)}" + definition[m.end():])
+    return out
+
+
+FLOAT = re.compile(r"(?<![\w.])(\d+\.\d*|\.\d+)([eE][-+]?\d+)?([fF])?(?![\w.])")
+
+
+def _exact_float(literal):
+    import struct
+    value = float(literal)
+    return struct.unpack("f", struct.pack("f", value))[0] == value
+
+
+def t_float_literal(definition, members=None):
+    """A floating literal as float or as double: 2.5f <-> 2.5, 2.f -> 2.0, only for values a float holds
+    exactly (the value is the same; where it meets a float the compiler may compute in float or in double);
+    one site at a time, then every site at once each way."""
+    start = _after_head(definition)
+    strings = [(m.start(), m.end()) for m in re.finditer(STRING, definition)]
+    sites = []
+    for m in FLOAT.finditer(definition):
+        if m.start() < start or any(a <= m.start() < b for a, b in strings) or not _exact_float(m.group(1) + (m.group(2) or "")):
+            continue
+        digits = m.group(1)
+        if m.group(3):
+            new = (digits + "0" if digits.endswith(".") else digits) + (m.group(2) or "")
+        else:
+            new = digits + (m.group(2) or "") + "f"
+        sites.append((m.start(), m.end(), new, bool(m.group(3))))
+    out = [definition[:a] + new + definition[b:] for a, b, new, _ in sites]
+    for suffixed in (True, False):
+        chosen = [s for s in sites if s[3] == suffixed]
+        if len(chosen) > 1:
+            text = definition
+            for a, b, new, _ in reversed(chosen):
+                text = text[:a] + new + text[b:]
+            out.append(text)
+    return out
+
+
+def _ternary(expr):
+    """(condition, then, else) of an expression that is one top-level conditional, or None."""
+    q = _top_level(expr, "?")
+    if len(q) != 1:
+        return None
+    colons = [i for i in _top_level(expr, ":") if i > q[0] and not expr.startswith("::", i) and expr[i - 1] != ":"]
+    if len(colons) != 1:
+        return None
+    return expr[:q[0]].strip(), expr[q[0] + 1:colons[0]].strip(), expr[colons[0] + 1:].strip()
+
+
+def _strip_brackets(text):
+    text = text.strip()
+    if text.startswith("(") and _match_close(text, 0) == len(text) - 1:
+        return text[1:-1].strip()
+    return text
+
+
+def t_ternary(definition, members=None):
+    """x = c ? a : b; <-> if( c ) { x = a; } else { x = b; }, and the same for return."""
+    d = Definition(definition)
+    out = []
+    for b0 in _blocks(definition, d.body_start):
+        try:
+            block = definition[b0:_match_close(definition, b0, "{", "}") + 1]
+        except Fail:
+            continue
+        for a, b in statements(block):
+            st = block[a:b]
+            indent = re.search(r"[^\S\n]*$", block[:a]).group(0)
+            m = re.fullmatch(rf"(return\s+|({CHAIN}(?:\[[^\]]*\])?)\s*=\s*)(.+);", st, re.S)
+            if m and "{" not in st and not st.startswith(("if", "for", "while")) and (t := _ternary(m.group(3))):
+                c, x, y = t
+                lhs = "return " if m.group(1).startswith("return") else f"{m.group(2)} = "
+                new = (f"if( {_strip_brackets(c)} )\n{indent}{{\n{indent}\t{lhs}{x};\n{indent}}}\n{indent}else\n"
+                       f"{indent}{{\n{indent}\t{lhs}{y};\n{indent}}}")
+                out.append(definition[:b0 + a] + new + definition[b0 + b:])
+                continue
+            m = re.fullmatch(r"if\(", st[:3])
+            if not m:
+                continue
+            close = _match_close(st, 2)
+            rest = st[close + 1:]
+            arms = re.fullmatch(r"\s*\{\s*([^;{}]+;)\s*\}\s*else\s*\{\s*([^;{}]+;)\s*\}\s*", rest) or \
+                re.fullmatch(r"\s*([^;{}]+;)\s*else\s*([^;{}]+;)\s*", rest)
+            if not arms:
+                continue
+            c = st[3:close].strip()
+            one = re.fullmatch(rf"(return\s+|({CHAIN}(?:\[[^\]]*\])?)\s*=\s*)(.+);", arms.group(1).strip(), re.S)
+            two = re.fullmatch(rf"(return\s+|({CHAIN}(?:\[[^\]]*\])?)\s*=\s*)(.+);", arms.group(2).strip(), re.S)
+            if not one or not two or one.group(1).strip() != two.group(1).strip() or (one.group(2) or "") != (two.group(2) or ""):
+                continue
+            if "=" in one.group(1) and re.match(r"[=]", one.group(3)):
+                continue
+            lhs = "return " if one.group(1).startswith("return") else f"{one.group(2)} = "
+            new = f"{lhs}{c} ? {one.group(3).strip()} : {two.group(3).strip()};"
+            out.append(definition[:b0 + a] + new + definition[b0 + b:])
+    return out
+
+
+def _if_chain_end(text, i):
+    """The end of the if statement at text[i] (its else if / else arms included)."""
+    close = _match_close(text, text.index("(", i))
+    j = close + 1
+    m = re.match(r"\s*\{", text[j:])
+    if m:
+        j = _match_close(text, j + m.end() - 1, "{", "}") + 1
+    else:
+        j = text.index(";", j) + 1
+    e = re.match(r"\s*else\b\s*", text[j:])
+    if not e:
+        return j
+    k = j + e.end()
+    if text.startswith("if", k) and re.match(r"if\s*\(", text[k:]):
+        return _if_chain_end(text, k)
+    if text.startswith("{", k):
+        return _match_close(text, k, "{", "}") + 1
+    return text.index(";", k) + 1
+
+
+def t_else_if(definition, members=None):
+    """else if( c ) ... <-> else { if( c ) ... }: an else holding nothing but an if (with its own arms)."""
+    start = Definition(definition).body_start
+    out = []
+    for m in re.finditer(r"\belse[ \t]+if\(", definition):
+        if m.start() < start:
+            continue
+        i = m.start() + m.group(0).index("if")
+        try:
+            end = _if_chain_end(definition, i)
+        except (Fail, ValueError):
+            continue
+        ls = definition.rfind("\n", 0, m.start()) + 1
+        indent = re.match(r"[ \t]*", definition[ls:]).group(0)
+        inner = definition[i:end].replace("\n", "\n\t")
+        out.append(definition[:m.start()] + f"else\n{indent}{{\n{indent}\t{inner}\n{indent}}}" + definition[end:])
+    for m in re.finditer(r"\belse\s*\{", definition):
+        if m.start() < start:
+            continue
+        b0 = m.end() - 1
+        b1 = _match_close(definition, b0, "{", "}")
+        inside = definition[b0 + 1:b1]
+        k = len(inside) - len(inside.lstrip())
+        if not re.match(r"if\(", inside[k:]):
+            continue
+        try:
+            end = _if_chain_end(inside, k)
+        except (Fail, ValueError):
+            continue
+        if inside[end:].strip() or "//" in inside[:k]:
+            continue
+        ls = definition.rfind("\n", 0, b0) + 1
+        indent = re.match(r"[ \t]*", definition[ls:]).group(0) if not definition[ls:m.start()].strip() else \
+            re.match(r"[ \t]*", definition[definition.rfind("\n", 0, m.start()) + 1:]).group(0)
+        chain = inside[k:end].replace("\n" + indent + "\t", "\n" + indent)
+        out.append(definition[:m.start()] + "else " + chain + definition[b1 + 1:])
+    return out
+
+
+MUTATORS = ("Add", "AddUnique", "AddZeroed", "AddDefaulted", "AddUninitialized", "Emplace", "EmplaceAt", "Insert",
+            "Push", "Pop", "Append", "Remove", "RemoveAt", "RemoveSwap", "RemoveAtSwap", "RemoveAll", "RemoveSingle",
+            "Empty", "Reset", "SetNum", "SetNumZeroed", "SetNumUninitialized", "Init", "Shrink", "Reserve", "Sort",
+            "StableSort", "Swap", "MoveTemp")
+
+
+def t_hoist_count(definition, members=None):
+    """for( int32 i = 0; i < x.Num(); ... ) -> const int32 count = x.Num(); for( ...; i < count; ... ), where the
+    loop neither changes x's size nor hands x elsewhere (AddVolume matched by reading Num once before its loop)."""
+    d = Definition(definition)
+    out = []
+    pat = re.compile(rf"\bfor\(\s*(?:int32|int|uint32|int64|SIZE_T)\s+({IDENT})\s*=[^;]*;\s*\1\s*<\s*(({CHAIN})(?:->|\.)(?:Num|Len)\(\s*\))\s*;")
+    for m in pat.finditer(definition):
+        if m.start() < d.body_start:
+            continue
+        ls = definition.rfind("\n", 0, m.start()) + 1
+        if definition[ls:m.start()].strip():
+            continue
+        x = m.group(3)
+        close = _match_close(definition, m.start() + 3)
+        b = re.match(r"\s*\{", definition[close + 1:])
+        end = _match_close(definition, close + 1 + b.end() - 1, "{", "}") if b else definition.find(";", close)
+        loop = definition[close:end]
+        root = re.escape(x)
+        if re.search(rf"\b{root}\s*(?:->|\.)\s*(?:{'|'.join(MUTATORS)})\b|\b{root}\s*(?:[,)]|=(?!=))|MoveTemp\(\s*{root}", loop):
+            continue
+        name = "count"
+        while re.search(rf"\b{name}\b", definition):
+            name += "2"
+        indent = definition[ls:m.start()]
+        text = definition[:m.start()] + f"const int32 {name} = {m.group(2)};\n{indent}" + definition[m.start():]
+        k = m.start() + len(f"const int32 {name} = {m.group(2)};\n{indent}")
+        text = text[:k + m.start(2) - m.start()] + name + text[k + m.end(2) - m.start():]
+        out.append(text)
+    return out
+
+
+def t_flip_comparison(definition, members=None):
+    """a < b -> b > a, a <= b -> b >= a (and back), where the comparison is a whole operand of its own."""
+    d = Definition(definition)
+    head, body = definition[:d.body_start], d.body
+    out = []
+    for l0, k, r0, r1, op in _operand_pairs(body, (" < ", " <= ", " > ", " >= "), FOR_EDGE):
+        flipped = {" < ": " > ", " > ": " < ", " <= ": " >= ", " >= ": " <= "}[op]
+        out.append(head + body[:l0] + body[r0:r1] + flipped + body[l0:k] + body[r1:])
+    return out
+
+
+def rules_version():
+    """A short tag of the targeted rule set: a runner that kept "targeted rules done" for a text runs them again
+    when the set changes."""
+    import hashlib
+    return hashlib.sha1(" ".join(rule_name(r) for r in TARGETED).encode()).hexdigest()[:10]
+
+
 def _each(rule, tries=60, cap=12):
     def run(definition, members=None):
         d = Definition(definition)
@@ -1065,9 +1568,10 @@ def _each(rule, tries=60, cap=12):
     return run
 
 
-TARGETED = [t_init_add, t_init_in, t_init_value, t_init_out, t_fname, t_fstring, t_loop_reference, t_counter_type,
-            t_move_declaration, t_hoist_test, t_inline_local, t_swap_terms, t_swap_arguments, t_swap_statements,
-            _each(r_swap_operands), _each(r_condition), _each(r_split_if_init), _each(r_invert_early_return),
+TARGETED = [t_init_add, t_init_in, t_init_value, t_init_out, t_store_order, t_fname, t_fstring, t_loop_reference,
+            t_counter_type, t_empty_test, t_null_test, t_increment, t_flip_comparison, t_float_literal, t_ternary,
+            t_else_if, t_hoist_count, t_move_declaration, t_hoist_test, t_inline_local, t_swap_terms, t_swap_arguments,
+            t_swap_statements, t_move_statement, _each(r_swap_operands), _each(r_condition), _each(r_split_if_init), _each(r_invert_early_return),
             _each(r_swap_if_else), _each(r_cast), _each(r_const), _each(r_introduce_temp, cap=6)]
 
 

@@ -199,6 +199,155 @@ class OrderTest(unittest.TestCase):
             self.assertLess(t.index("const FString msg"), t.index("Send( msg )"))
 
 
+DORMANT = """AWidgetBelt::AWidgetBelt()
+{
+
+	mTickFunction.bCanEverTick = true;
+	mSpeed = 2.f;
+	NetDormancy = DORM_Initial;
+	Label = FString( TEXT( "Belt" ) );
+}"""
+
+BELT_HEADER = """class GAME_API AWidgetBelt : public AActor
+{
+	GENERATED_BODY()
+public:
+	float mSpeed;
+	FTickFunction mTickFunction;
+	FString Label;
+};
+"""
+
+
+class StoreOrderTest(unittest.TestCase):
+    def test_a_store_moves_past_two_neighbours_in_one_step(self):
+        out = texts(permute.t_move_statement, DORMANT)
+        self.assertIn(DORMANT.replace("\tmTickFunction.bCanEverTick = true;\n\tmSpeed = 2.f;\n\tNetDormancy = DORM_Initial;\n",
+                                      "\tNetDormancy = DORM_Initial;\n\tmTickFunction.bCanEverTick = true;\n\tmSpeed = 2.f;\n"), out)
+        self.assertFalse(any(t == DORMANT for t in out))
+
+    def test_statements_that_depend_on_each_other_keep_their_order(self):
+        body = "void F()\n{\n\tmA = 1;\n\tmB.X = 2;\n\tmC = mA;\n\tGo();\n\tStop();\n\tmB = Make();\n}"
+        for t in texts(permute.t_move_statement, body):
+            self.assertLess(t.index("mA = 1"), t.index("mC = mA"))
+            self.assertLess(t.index("Go()"), t.index("Stop()"))   # two calls: side effects
+            self.assertLess(t.index("mB.X = 2"), t.index("mB = Make()"))   # a chain and its prefix
+
+    def test_constructor_stores_in_member_order_inherited_first(self):
+        members = permute.class_members(BELT_HEADER, "AWidgetBelt")
+        out = texts(permute.t_store_order, DORMANT, members=members)
+        self.assertIn(DORMANT.replace(
+            "\tmTickFunction.bCanEverTick = true;\n\tmSpeed = 2.f;\n\tNetDormancy = DORM_Initial;\n\tLabel",
+            "\tNetDormancy = DORM_Initial;\n\tmSpeed = 2.f;\n\tmTickFunction.bCanEverTick = true;\n\tLabel"), out)
+        self.assertIn(DORMANT.replace(
+            "\tmTickFunction.bCanEverTick = true;\n\tmSpeed = 2.f;\n\tNetDormancy = DORM_Initial;\n\tLabel",
+            "\tNetDormancy = DORM_Initial;\n\tmTickFunction.bCanEverTick = true;\n\tmSpeed = 2.f;\n\tLabel"), out)
+        self.assertEqual(texts(permute.t_store_order, LOOP, members=members), [])   # not a constructor
+
+    def test_two_stores_on_one_line_keep_the_layout(self):
+        ctor = "AFoo::AFoo()\n{\n\tmB = true; mA = true;\n\tNetDormancy = DORM_Initial;\n}"
+        members = permute.class_members("class AFoo : public AActor\n{\n\tbool mA;\n\tbool mB;\n};", "AFoo")
+        out = texts(permute.t_store_order, ctor, members=members)
+        self.assertIn("AFoo::AFoo()\n{\n\tNetDormancy = DORM_Initial; mA = true;\n\tmB = true;\n}", out)
+
+
+class TestFormsTest(unittest.TestCase):
+    def test_emptiness_three_ways(self):
+        d = "void F()\n{\n\tif( !mItems.IsEmpty() ) { Go(); }\n\tif( Other->Num() == 0 ) { Stop(); }\n}"
+        out = texts(permute.t_empty_test, d)
+        self.assertIn(d.replace("!mItems.IsEmpty()", "mItems.Num() > 0"), out)
+        self.assertIn(d.replace("!mItems.IsEmpty()", "mItems.Num() != 0"), out)
+        self.assertIn(d.replace("Other->Num() == 0", "Other->IsEmpty()"), out)
+        back = texts(permute.t_empty_test, d.replace("!mItems.IsEmpty()", "mItems.Num() > 0"))
+        self.assertIn(d, back)
+
+    def test_a_string_measured_with_len(self):
+        d = "void F()\n{\n\tif( Name.IsEmpty() || Name.Len() > 8 ) { Go(); }\n}"
+        self.assertIn(d.replace("Name.IsEmpty()", "Name.Len() == 0"), texts(permute.t_empty_test, d))
+
+    def test_null_tests_in_every_term(self):
+        d = "void F()\n{\n\tif( mOwner && Thing->Other != nullptr ) { Go(); }\n\twhile( !p ) { Next(); }\n}"
+        out = texts(permute.t_null_test, d)
+        self.assertIn(d.replace("if( mOwner &&", "if( mOwner != nullptr &&"), out)
+        self.assertIn(d.replace("Thing->Other != nullptr", "Thing->Other"), out)
+        self.assertIn(d.replace("while( !p )", "while( p == nullptr )"), out)
+        self.assertFalse(any("bReady != nullptr" in t for t in texts(permute.t_null_test, "void F()\n{\n\tif( bReady ) {}\n}")))
+
+    def test_comparisons_flipped(self):
+        out = texts(permute.t_flip_comparison, LOOP)
+        self.assertIn(LOOP.replace("i < mItems.Num()", "mItems.Num() > i"), out)
+        self.assertIn(LOOP.replace("removed > 0", "0 < removed"), out)
+        self.assertFalse(any("TArray" in t for t in texts(permute.t_flip_comparison, "void F()\n{\n\tTArray< int32 > a;\n}")))
+
+
+class NegationTest(unittest.TestCase):
+    def test_no_double_negation(self):
+        self.assertEqual(permute.negate("!IsValid( inactivePlayerState )"), "IsValid( inactivePlayerState )")
+        self.assertEqual(permute.negate("!( !IsValid( x ) )"), "!IsValid( x )")
+        self.assertEqual(permute.negate("a == b"), "a != b")
+        self.assertEqual(permute.negate("a != b"), "a == b")
+        self.assertEqual(permute.negate("mReady"), "!mReady")
+        self.assertEqual(permute.negate("a && b"), "!( a && b )")
+        self.assertEqual(permute.negate("x->Num() > 0"), "!( x->Num() > 0 )")   # floats: < is not >='s negation
+
+    def test_swap_if_else_reads_clean(self):
+        d = ("void F()\n{\n\tif( !IsValid( p ) )\n\t{\n\t\tRemove( i );\n\t}\n\telse\n\t{\n\t\tUse( p );\n\t}\n}")
+        out = texts(permute._each(permute.r_swap_if_else), d)
+        self.assertIn("void F()\n{\n\tif( IsValid( p ) )\n\t{\n\t\tUse( p );\n\t}\n\telse\n\t{\n\t\tRemove( i );\n\t}\n}", out)
+
+
+class ExpressionFormsTest(unittest.TestCase):
+    def test_increments(self):
+        out = texts(permute.t_increment, LOOP)
+        self.assertIn(LOOP.replace("++i )", "i++ )"), out)
+        d = "void F()\n{\n\tcount += 1;\n\tindex--;\n}"
+        out = texts(permute.t_increment, d)
+        self.assertIn(d.replace("count += 1;", "++count;"), out)
+        self.assertIn(d.replace("index--;", "--index;"), out)
+        self.assertFalse(any("x = ++" in t for t in texts(permute.t_increment, "void F()\n{\n\tx = y++;\n}")))
+
+    def test_float_literals(self):
+        d = "void F()\n{\n\tmSpeed = 2.f;\n\tmScale = 0.5;\n\tmOdd = 0.1f;\n\tLog( \"1.5\" );\n}"
+        out = texts(permute.t_float_literal, d)
+        self.assertIn(d.replace("2.f", "2.0"), out)
+        self.assertIn(d.replace("0.5;", "0.5f;"), out)
+        self.assertFalse(any("0.1;" in t for t in out))   # not a float exactly: the value would change
+        self.assertFalse(any('"1.5f"' in t for t in out))   # a string
+        self.assertTrue(any("2.0" in t and "0.1f" in t and "0.5;" in t for t in out))   # every suffixed one at once
+
+    def test_ternary_and_back(self):
+        d = "void F()\n{\n\tRate.Yaw = State == CS_Fight ? mCombat : mDefault;\n}"
+        out = texts(permute.t_ternary, d)
+        split = ("void F()\n{\n\tif( State == CS_Fight )\n\t{\n\t\tRate.Yaw = mCombat;\n\t}\n\telse\n\t{\n"
+                 "\t\tRate.Yaw = mDefault;\n\t}\n}")
+        self.assertIn(split, out)
+        self.assertIn(d, texts(permute.t_ternary, split))
+        r = "int32 F()\n{\n\treturn bLeft ? -1 : 1;\n}"
+        self.assertIn("int32 F()\n{\n\tif( bLeft )\n\t{\n\t\treturn -1;\n\t}\n\telse\n\t{\n\t\treturn 1;\n\t}\n}",
+                      texts(permute.t_ternary, r))
+        self.assertEqual(texts(permute.t_ternary, "void F()\n{\n\tif( a ) { x = 1; } else { y = 2; }\n}"), [])
+
+    def test_else_if_and_nested(self):
+        d = "void F()\n{\n\tif( a )\n\t{\n\t\tA();\n\t}\n\telse if( b )\n\t{\n\t\tB();\n\t}\n}"
+        nested = "void F()\n{\n\tif( a )\n\t{\n\t\tA();\n\t}\n\telse\n\t{\n\t\tif( b )\n\t\t{\n\t\t\tB();\n\t\t}\n\t}\n}"
+        self.assertIn(nested, texts(permute.t_else_if, d))
+        self.assertIn(d, texts(permute.t_else_if, nested))
+        self.assertEqual(texts(permute.t_else_if, nested.replace("\t\t\tB();\n\t\t}\n", "\t\t\tB();\n\t\t}\n\t\tC();\n")), [])
+
+    def test_a_count_read_once_before_its_loop(self):
+        out = texts(permute.t_hoist_count, LOOP)
+        self.assertIn(LOOP.replace("\tfor( int32 i = 0; i < mItems.Num(); ++i )",
+                                   "\tconst int32 count = mItems.Num();\n\tfor( int32 i = 0; i < count; ++i )"), out)
+        grows = "void F()\n{\n\tfor( int32 i = 0; i < mItems.Num(); ++i )\n\t{\n\t\tmItems.RemoveAt( i );\n\t}\n}"
+        self.assertEqual(texts(permute.t_hoist_count, grows), [])
+        handed = "void F()\n{\n\tfor( int32 i = 0; i < mItems.Num(); ++i )\n\t{\n\t\tFill( mItems );\n\t}\n}"
+        self.assertEqual(texts(permute.t_hoist_count, handed), [])
+
+    def test_the_rule_set_has_a_version(self):
+        self.assertEqual(len(permute.rules_version()), 10)
+        self.assertEqual(permute.rules_version(), permute.rules_version())
+
+
 class TargetedTest(unittest.TestCase):
     def test_every_candidate_once_rule_by_rule_with_what_changed(self):
         members = permute.class_members(HEADER, "AWidgetHolder")
