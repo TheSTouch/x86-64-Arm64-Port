@@ -276,6 +276,7 @@ class State:
 
     def __init__(self, path):
         self.path = Path(path)
+        self.lock = threading.Lock()
         self.data = {"version": 1, "functions": {}, "blobs": {}, "round": 0, "compiles": 0, "compile_seconds": 0.0,
                      "waited": 0.0, "running": 0.0}
         if self.path.is_file():
@@ -289,9 +290,11 @@ class State:
         return self.functions.setdefault(row.function, _new_function(row))
 
     def save(self):
-        tmp = self.path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(self.data, indent=1), encoding="utf-8")
-        os.replace(tmp, self.path)
+        with self.lock:
+            text = json.dumps(self.data, indent=1)
+            tmp = self.path.with_suffix(".tmp")
+            tmp.write_text(text, encoding="utf-8")
+            os.replace(tmp, self.path)
 
 
 # ---------------------------------------------------------------------------------------------- the runner
@@ -361,6 +364,11 @@ class Night:
                     said = reason
                 self.sleep(LOAD_POLL)
                 self.state.data["waited"] += LOAD_POLL
+                try:   # a long wait shows in the reports (the main thread may be changing the state meanwhile)
+                    self.perf(load=load)
+                    self.state.save()
+                except RuntimeError:
+                    pass
             if said:
                 self.log("going on")
 
@@ -630,11 +638,13 @@ class Night:
 
     def save_win(self, row, fs, text, chain, began):
         fs["result"], fs["best"], fs["best_text"], fs["best_chain"] = "won", 0, text, chain
+        fs["found_by"], fs["found_at"] = self.machine.name, time.strftime("%Y-%m-%d %H:%M:%S")
         took = self.clock() - began + fs["seconds"]
         win = {"function": row.function, "file": row.file, "blob": row.blob, "bytes": row.bytes,
                "source_function": permute.source_function(row.function), "old": fs["original"], "new": text,
                "chain": chain, "start": fs["start"], "seconds": round(took), "candidates": fs["candidates"],
-               "found": time.strftime("%Y-%m-%d %H:%M:%S"), "machine": self.machine.name}
+               "found": fs["found_at"], "machine": self.machine.name, "found_by": fs["found_by"],
+               "found_at": fs["found_at"]}
         base = self.results / "wins" / safe(row.function)
         base.with_suffix(".json").write_text(json.dumps(win, indent=1), encoding="utf-8")
         diff = difflib.unified_diff(fs["original"].splitlines(True), text.splitlines(True), f"a/{row.file}", f"b/{row.file}")
@@ -658,7 +668,17 @@ class Night:
                 fs["note"].replace("\t", " ").replace("\n", " ")]))
         (self.results / "report.tsv").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
-    def perf(self, force=False):
+    def found_by(self, name, fs):
+        """The machine that found a won function: the state's found_by, or for a win from before it was kept
+        there, its win file's machine."""
+        if fs.get("found_by"):
+            return fs["found_by"]
+        try:
+            return json.loads((self.results / "wins" / f"{safe(name)}.json").read_text(encoding="utf-8")).get("machine")
+        except (OSError, ValueError):
+            return None
+
+    def perf(self, force=False, load=None):
         now = self.clock()
         if not force and self.last_perf is not None and now - self.last_perf < PERF_EVERY:
             return
@@ -667,10 +687,11 @@ class Night:
         running = d["running"] + (now - self.started)
         fns = [f for f in d["functions"].values() if f["candidates"] or f["result"] != "pending"]
         won = [f for f in fns if f["result"] == "won"]
+        here = [f for n, f in d["functions"].items() if f["result"] == "won" and self.found_by(n, f) == self.machine.name]
         closer = [f for f in fns if f["result"] == "closer"]
         hours = running / 3600 or 1e-9
         try:
-            load = f"{self.machine.load():.1f}"
+            load = f"{self.machine.load() if load is None else load:.1f}"
         except Exception:   # a report never stops the run
             load = "?"
         text = "\n".join([
@@ -681,8 +702,9 @@ class Night:
             f"compiles           {d['compiles']} ({d['compiles'] / hours:.0f} per hour)",
             f"seconds a compile  {d['compile_seconds'] / max(1, d['compiles']):.0f}",
             f"functions tried    {len(fns)} of {len(self.rows)} (round {d['round'] + 1})",
-            f"wins               {len(won)} functions, {sum(f['bytes'] for f in won)} bytes "
-            f"({len(won) / hours:.2f} functions and {sum(f['bytes'] for f in won) / hours / 1024:.1f} KB per hour)",
+            f"wins               {len(won)} functions, {sum(f['bytes'] for f in won)} bytes ({len(here)} found here: "
+            f"{len(here) / hours:.2f} functions and {sum(f['bytes'] for f in here) / hours / 1024:.1f} KB per hour; "
+            f"{len(won) - len(here)} inherited)",
             f"closer             {len(closer)} functions, {sum(f['bytes'] for f in closer)} bytes",
         ])
         (self.results / "perf.txt").write_text(text + "\n", encoding="utf-8")

@@ -294,6 +294,38 @@ class NightTest(unittest.TestCase):
         self.assertTrue(any("going on" in line for line in self.logs))
         self.assertGreaterEqual(json.loads((self.results / "state.json").read_text())["waited"], 90)
 
+    def test_wins_per_hour_count_only_this_machine_s(self):
+        # A-3 (a): a state seeded from another machine's: its wins are inherited, not found here
+        self.results.mkdir()
+        (self.results / "wins").mkdir()
+        old = {"result": "won", "bytes": 100, "candidates": 3, "found_by": "the PC", "found_at": "2026-11-19 03:00:00"}
+        older = {"result": "won", "bytes": 50, "candidates": 2}   # from before found_by: its win file says where
+        (self.results / "wins" / "UFoo_Older.json").write_text(json.dumps({"machine": "the PC"}))
+        (self.results / "state.json").write_text(json.dumps({"functions": {
+            "UFoo::Old": dict(night._new_function(night.Row("1", "FGFoo.cpp", "UFoo::Old", 100)), **old),
+            "UFoo::Older": dict(night._new_function(night.Row("1", "FGFoo.cpp", "UFoo::Older", 50)), **older)}}))
+        n, _ = self.night(hours=0.5)
+        state = n.run()
+        tick = state.functions["UFoo::Tick"]
+        self.assertEqual(tick["found_by"], "test machine")
+        self.assertRegex(tick["found_at"], r"^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d$")
+        win = json.loads((self.results / "wins" / "UFoo_Tick.json").read_text())
+        self.assertEqual((win["found_by"], win["found_at"]), ("test machine", tick["found_at"]))
+        perf = (self.results / "perf.txt").read_text()
+        m = __import__("re").search(r"wins +3 functions, 450 bytes \(1 found here: ([\d.]+) functions and [\d.]+ KB "
+                                    r"per hour; 2 inherited\)", perf)
+        self.assertTrue(m, perf)
+        self.assertAlmostEqual(float(m.group(1)), 1 / (state.data["running"] / 3600), places=2)   # 1, not 3, a run
+
+    def test_perf_and_state_are_written_while_it_waits(self):
+        # A-3 (b): an hour's wait shows in perf.txt (its time and the minutes waited) and in the state
+        n, _ = self.night(machine=Machine(loads=[9.0] * 15 + [1.0]), hours=1)
+        n.wait_for_room()
+        perf = (self.results / "perf.txt").read_text()
+        self.assertRegex(perf, r"waited for the machine [56] min")
+        self.assertIn("load now 9.0", perf)
+        self.assertGreaterEqual(json.loads((self.results / "state.json").read_text())["waited"], 300)
+
     def test_it_starts_a_compile_only_while_there_is_room_for_it(self):
         # C-21 (deliberately replaces C-18's test): its own compiles count in the busy cores, so it grows into the
         # room left and shrinks when the machine is used. 2.5 busy of 4: room for one more.
