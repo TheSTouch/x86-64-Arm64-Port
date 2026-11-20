@@ -43,7 +43,8 @@ from .util import Fail
 MODULE = "FactoryGameRecomp"
 PERF_EVERY = 300          # seconds between perf.txt rewrites
 LOAD_POLL = 30            # seconds between load checks while waiting
-KEEP = 5                  # best candidates kept per function, parents of the random rewrites
+KEEP = 5                  # best candidates kept per function (ties of the best too): parents of the rewrites
+PAIRS = 40                # pairs of targeted edits tried per function per round
 WINDOWS = os.name == "nt"
 # On the PC: work that must have the machine (read only: never stopped or touched). Extend with --busy.
 BUSY_PROCESSES = ("FactoryGameSteam-Win64-Shipping.exe", "FactoryGame-Win64-Shipping.exe", "FactoryGameSteam.exe",
@@ -237,6 +238,31 @@ class Compiler:
             return res
 
 
+# ---------------------------------------------------------------------------------------------- candidates
+
+def keep_parents(parents, best_chain):
+    """The KEEP best candidates, [score, text, chain] each: by score, each text once, and among equal scores the
+    ones whose chain differs from the best's first (a tie reached another way is a step somewhere new)."""
+    out, texts = [], set()
+    for p in sorted(parents, key=lambda p: (p[0], list(p[2]) == list(best_chain))):
+        if p[1] in texts:
+            continue
+        texts.add(p[1])
+        out.append(p)
+    return out[:KEEP]
+
+
+def _span(base, new):
+    """What an edit changed: (start, end, replacement) in base."""
+    p = 0
+    while p < min(len(base), len(new)) and base[p] == new[p]:
+        p += 1
+    s = 0
+    while s < min(len(base), len(new)) - p and base[-1 - s] == new[-1 - s]:
+        s += 1
+    return p, len(base) - s, new[p:len(new) - s]
+
+
 # ---------------------------------------------------------------------------------------------- state
 
 def _new_function(row):
@@ -413,26 +439,41 @@ class Night:
     # -------------------------------------------------------------------------------- one function
 
     def candidates(self, fs, rng, k, members):
-        """Up to k new candidates: the targeted ones not tried yet (from the best so far), else random rewrites
-        of the best ones. (text, chain, change) each."""
+        """Up to k new candidates, (text, chain, change) each: the targeted ones not tried yet, from the best so
+        far and then from each kept parent (ties of the best among them: a fix often takes two steps whose first
+        leaves the score as it is); when every parent's are done, pairs of targeted edits of the best that each
+        alone did not lower the score (PAIRS a round); then random rewrites of the kept ones. `change` is set for
+        the best's targeted edits only (fs["tried"])."""
         seen, tried = set(fs["seen"]), set(fs["tried"])
         out = []
-        base = fs["best_text"]
-        if not fs.get("targeted_done"):
+        done = fs.setdefault("targeted_from", [])
+        bases = [(fs["best_text"], fs["best_chain"], True)] + [(p[1], p[2], False) for p in fs["parents"]]
+        for base, chain, best in bases:
+            h = sha(base)
+            if h in done:
+                continue
+            fresh = 0
             for e in permute.targeted(base, members=members):
-                if e.change in tried:
+                if best and e.change in tried:
                     continue
                 text = permute.keep_lines(fs["original"], e.text)
                 if sha(text) in seen:
-                    tried.add(e.change)
-                    fs["tried"].append(e.change)
+                    if best:
+                        tried.add(e.change)
+                        fs["tried"].append(e.change)
                     continue
-                out.append((text, fs["best_chain"] + [e.rule], e.change))
+                out.append((text, chain + [e.rule], e.change if best else None))
                 seen.add(sha(text))
+                fresh += 1
                 if len(out) >= k:
                     return out
-            if not out:
-                fs["targeted_done"] = True
+            if not fresh:
+                done.append(h)
+        if out:
+            return out
+        out = self.pairs(fs, seen, k, members)
+        if out:
+            return out
         idle = 0
         parents = fs["parents"] or [[fs["best"], fs["best_text"], fs["best_chain"]]]
         while len(out) < k and idle < 300:
@@ -451,6 +492,34 @@ class Night:
                 continue
             seen.add(sha(text))
             out.append((text, parent[2] + ["random"], None))
+        return out
+
+    def pairs(self, fs, seen, k, members):
+        """Up to k candidates applying two targeted edits of the best together, each one tried alone without
+        lowering the score, the most recently tried first; at most PAIRS a round (fs["pairs"] counts them)."""
+        out = []
+        if fs.get("pairs", 0) >= PAIRS:
+            return out
+        scores = fs.get("edit_scores", {})
+        recent = {c: i for i, c in enumerate(fs["tried"])}
+        base = fs["best_text"]
+        edits = [e for e in permute.targeted(base, members=members)
+                 if scores.get(e.change) is not None and scores[e.change] >= fs["best"]]
+        edits.sort(key=lambda e: recent.get(e.change, -1), reverse=True)
+        spans = [_span(base, e.text) for e in edits]
+        for j in range(1, len(edits)):
+            for i in range(j):
+                (a, ea), (b, eb) = sorted([(spans[i], edits[i]), (spans[j], edits[j])], key=lambda x: x[0][0])
+                if a[1] > b[0]:
+                    continue   # they overlap
+                text = permute.keep_lines(fs["original"], base[:a[0]] + a[2] + base[a[1]:b[0]] + b[2] + base[b[1]:])
+                if sha(text) in seen:
+                    continue
+                seen.add(sha(text))
+                out.append((text, fs["best_chain"] + [ea.rule, eb.rule], None))
+                fs["pairs"] = fs.get("pairs", 0) + 1
+                if len(out) >= k or fs["pairs"] >= PAIRS:
+                    return out
         return out
 
     def work(self, row):
@@ -500,6 +569,7 @@ class Night:
             budget_end = min(budget_end, self.deadline)
         rng = random.Random(f"{self.seed}:{row.function}:{fs['rounds']}")
         fs["rounds"] += 1
+        fs["pairs"] = 0
         began = self.clock()
         self.log(f"{row.function} ({row.bytes} bytes, blob {blob}): score {fs['best']}, round {fs['rounds']}, "
                  f"{minutes:g} min")
@@ -519,10 +589,13 @@ class Night:
                     fs["candidates"] += 1
                     fs["compiles"] += 1
                     fs["seen"].append(sha(cand))
+                    self.count_compile(res.seconds)
+                    failed = res.state == "failed" or res.score is None and res.state != "matched"
                     if change:
                         fs["tried"].append(change)
-                    self.count_compile(res.seconds)
-                    if res.state == "failed" or res.score is None and res.state != "matched":
+                        fs.setdefault("edit_scores", {})[change] = None if failed else \
+                            0 if res.state == "matched" else res.score
+                    if failed:
                         fs["failed"] += 1
                         continue
                     if res.state == "matched" and not res.full:
@@ -544,10 +617,7 @@ class Night:
                     if score < fs["best"]:
                         self.log(f"  {' + '.join(chain)}: {fs['best']} -> {score}")
                         fs["best"], fs["best_text"], fs["best_chain"] = score, cand, chain
-                        fs["targeted_done"] = False   # the targeted rules again, from the new best
-                    parents = fs["parents"] + [[score, cand, chain]]
-                    parents.sort(key=lambda p: p[0])
-                    fs["parents"] = parents[:KEEP]
+                    fs["parents"] = keep_parents(fs["parents"] + [[score, cand, chain]], fs["best_chain"])
                 self.state.save()
                 self.perf()
                 if won:

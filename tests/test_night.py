@@ -199,6 +199,60 @@ class NightTest(unittest.TestCase):
         self.assertEqual((self.project / "Source" / "FactoryGameRecomp-Recovered" / "FGFoo.cpp").read_text(), SOURCE)
         self.assertGreater(state.functions["UFoo::Stuck"]["rounds"], 1)
 
+    PAIR = "\nvoid UFoo::Pair( int32 a )\n{\n\tWait( a, 2 );\n\tGo( mA + mB );\n}\n"
+    PAIR_LIST = "blob\tfile\tfunction\tbytes\n1\tFGFoo.cpp\tUFoo::Pair\t200\n"
+
+    def pair_night(self, **kw):
+        """UFoo::Pair matches only with both of two targeted edits (its arguments swapped and its operands
+        swapped); either alone leaves the score at 3."""
+        f = self.project / "Source" / "FactoryGameRecomp-Recovered" / "FGFoo.cpp"
+        f.write_text(SOURCE + self.PAIR)
+        (self.dir / "list.tsv").write_text(self.PAIR_LIST)
+        test = self
+
+        class Fake(FakeCompiler):
+            def compile(self, blob, out_dir, function=None, include_first=None, full=False):
+                text = ((include_first / "FGFoo.cpp") if include_first else f).read_text()
+                with self.lock:
+                    self.texts.append((function, text))
+                test.clock.advance(40)
+                both = "Wait( 2, a );" in text and "mB + mA" in text
+                scores = {"UFoo::Pair": ("matched", 0) if both else ("differs", 3), "Other::Fine": ("matched", 0)}
+                if both or full:
+                    matched = {n for n, (st, _) in scores.items() if st == "matched"}
+                    st, sc = scores[function] if function else ("missing", None)
+                    return night.Result(st, sc, 40, matched=matched, scores=scores, full=True, targets=[])
+                return night.Result(*scores[function], 40)
+        return self.night(compiler=Fake(self.project, self.clock), **kw)
+
+    def test_a_fix_in_two_steps_the_first_a_tie_is_found_from_a_kept_tie(self):
+        # A-2 (a, b): today an edit that ties the score is dropped and the targeted rules run from the best only
+        n, compiler = self.pair_night(hours=0.5)
+        state = n.run()
+        pair = state.functions["UFoo::Pair"]
+        self.assertEqual(pair["result"], "won")
+        self.assertNotIn("random", pair["best_chain"])
+        self.assertEqual(sorted(pair["best_chain"]), ["swap-arguments", "swap-operands"])
+
+    def test_pairs_of_targeted_edits_when_the_parents_are_done(self):
+        # A-2 (c): with no parent kept, two edits that each tie the score are tried together
+        from unittest import mock
+        with mock.patch.object(night, "KEEP", 0):
+            n, compiler = self.pair_night(hours=0.5)
+            state = n.run()
+        pair = state.functions["UFoo::Pair"]
+        self.assertEqual(pair["result"], "won")
+        self.assertNotIn("random", pair["best_chain"])
+        self.assertEqual(len(pair["best_chain"]), 2)
+        self.assertLessEqual(pair["pairs"], night.PAIRS)
+
+    def test_parents_keep_ties_once_each_other_chains_first(self):
+        best = ["counter-type"]
+        kept = night.keep_parents([[3, "a", best], [3, "b", best + ["random"]], [3, "a", ["x"]], [2, "c", best],
+                                   [5, "d", ["y"]]], best)
+        self.assertEqual([p[1] for p in kept], ["c", "b", "a", "d"])
+        self.assertEqual(len(night.keep_parents([[1, str(i), []] for i in range(9)], [])), night.KEEP)
+
     def test_resume_goes_on_without_trying_a_candidate_twice(self):
         n, first = self.night(compiler=FakeCompiler(self.project, self.clock, win=False), hours=0.1)   # a few batches
         n.run()
