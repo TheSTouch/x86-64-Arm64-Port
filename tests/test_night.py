@@ -246,6 +246,25 @@ class NightTest(unittest.TestCase):
         self.assertEqual(len(pair["best_chain"]), 2)
         self.assertLessEqual(pair["pairs"], night.PAIRS)
 
+    def test_a_new_rule_set_runs_the_targeted_rules_again_from_every_base(self):
+        # the done-marks are per text and rule set (permute.rules_version): new rules reach bases already done
+        from unittest import mock
+        n, _ = self.pair_night(hours=0.5)
+        text = (self.project / "Source" / "FactoryGameRecomp-Recovered" / "FGFoo.cpp").read_text()
+        best = text[text.index("void UFoo::Pair"):].rstrip("\n")
+        fs = {"best_text": best, "best_chain": [], "best": 3, "original": best, "parents": [], "tried": [],
+              "seen": [], "targeted_done": True}
+        with mock.patch.object(night.permute, "rules_version", create=True, return_value="old"):
+            first = n.candidates(fs, None, 10, None)
+            self.assertEqual(len(first), 3)
+            fs["seen"] += [night.sha(t) for t, _, _ in first]
+            fs["tried"] += [c for _, _, c in first]
+            n.candidates(fs, __import__("random").Random(0), 2, None)   # the best is done for "old"
+            self.assertEqual(fs["targeted_from"], [night.sha(best) + ":old"])
+        with mock.patch.object(night.permute, "rules_version", create=True, return_value="new"):
+            n.candidates(fs, __import__("random").Random(0), 2, None)
+            self.assertIn(night.sha(best) + ":new", fs["targeted_from"])
+
     def test_parents_keep_ties_once_each_other_chains_first(self):
         best = ["counter-type"]
         kept = night.keep_parents([[3, "a", best], [3, "b", best + ["random"]], [3, "a", ["x"]], [2, "c", best],

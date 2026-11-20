@@ -470,9 +470,10 @@ class Night:
         seen, tried = set(fs["seen"]), set(fs["tried"])
         out = []
         done = fs.setdefault("targeted_from", [])
+        version = getattr(permute, "rules_version", lambda: "")()   # a new rule set runs from every base again
         bases = [(fs["best_text"], fs["best_chain"], True)] + [(p[1], p[2], False) for p in fs["parents"]]
         for base, chain, best in bases:
-            h = sha(base)
+            h = f"{sha(base)}:{version}"
             if h in done:
                 continue
             fresh = 0
