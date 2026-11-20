@@ -67,12 +67,15 @@ class Row:
     file: str
     function: str
     bytes: int
+    minutes: float = None   # this function's budget per round (None: the run's --per-function-minutes)
+    skip: str = ""          # non-empty: left out of the run, this the reason
 
 
 def read_list(path, order="big"):
     """The functions of a tab-separated list with blob, file, function and bytes columns (the leftovers and
     careful lists qualify); engine-drift rows (a `list` column saying so) left out; biggest first, or smallest
-    with order="small"; each function once."""
+    with order="small"; each function once. Two optional columns: `minutes` (the row's budget per round) and
+    `skip` (non-empty: the runner leaves the row out, saying why once); empty means not set."""
     rows, seen = [], set()
     with open(path, encoding="utf-8") as f:
         reader = csv.DictReader(f, delimiter="\t")
@@ -83,7 +86,13 @@ def read_list(path, order="big"):
             if "drift" in (r.get("list") or "") or not r["function"] or r["function"] in seen:
                 continue
             seen.add(r["function"])
-            rows.append(Row(r["blob"].strip(), r["file"].strip(), r["function"].strip(), int(r["bytes"] or 0)))
+            minutes = (r.get("minutes") or "").strip()
+            try:
+                minutes = float(minutes) if minutes else None
+            except ValueError:
+                raise Fail(f"{path}: {r['function']}: minutes {minutes!r} is not a number")
+            rows.append(Row(r["blob"].strip(), r["file"].strip(), r["function"].strip(), int(r["bytes"] or 0),
+                            minutes, (r.get("skip") or "").strip()))
     rows.sort(key=lambda r: r.bytes, reverse=order != "small")
     return rows
 
@@ -269,7 +278,8 @@ class Night:
     def __init__(self, project, rows, results, jobs=None, max_load=None, per_function_minutes=20.0, deadline=None,
                  log=print, compiler=None, machine=None, clock=time.monotonic, sleep=time.sleep, seed=0):
         self.project = Path(project).resolve()
-        self.rows = rows
+        self.rows = [r for r in rows if not r.skip]
+        self.skipped = [r for r in rows if r.skip]
         self.results = Path(results)
         self.results.mkdir(parents=True, exist_ok=True)
         (self.results / "wins").mkdir(exist_ok=True)
@@ -484,13 +494,15 @@ class Night:
                 members = self.members(d.cls)
         except Fail:
             pass
-        budget_end = self.clock() + 60 * self.minutes   # from here: the blob's baseline is not the function's time
+        minutes = row.minutes if row.minutes is not None else self.minutes
+        budget_end = self.clock() + 60 * minutes   # from here: the blob's baseline is not the function's time
         if self.deadline is not None:
             budget_end = min(budget_end, self.deadline)
         rng = random.Random(f"{self.seed}:{row.function}:{fs['rounds']}")
         fs["rounds"] += 1
         began = self.clock()
-        self.log(f"{row.function} ({row.bytes} bytes, blob {blob}): score {fs['best']}, round {fs['rounds']}")
+        self.log(f"{row.function} ({row.bytes} bytes, blob {blob}): score {fs['best']}, round {fs['rounds']}, "
+                 f"{minutes:g} min")
         with concurrent.futures.ThreadPoolExecutor(max_workers=self.jobs) as pool:
             while self.clock() < budget_end and not self.stopping() and not self.out_of_time():
                 batch = self.candidates(fs, rng, self.jobs, members)
@@ -616,6 +628,8 @@ class Night:
             self.log("night: an old STOP file removed")
         self.log(f"night: {len(self.rows)} functions, {self.jobs} jobs, max load {self.max_load:.1f}, "
                  f"{self.minutes:g} min a function, {self.machine.name}")
+        for row in self.skipped:
+            self.log(f"{row.function}: skipped: {row.skip}")
         round_began = -1
         try:
             while not self.stopping() and not self.out_of_time():

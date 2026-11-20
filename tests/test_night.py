@@ -141,6 +141,36 @@ class NightTest(unittest.TestCase):
         self.assertEqual([r.function for r in rows], ["UFoo::Tick", "UFoo::Stuck"])
         self.assertEqual([r.function for r in night.read_list(self.dir / "list.tsv", "small")], ["UFoo::Stuck", "UFoo::Tick"])
 
+    def test_the_list_s_minutes_and_skip_columns(self):
+        # A-1: a row's own budget per round, and rows left out with the reason logged once at start
+        (self.dir / "list.tsv").write_text(
+            "blob\tfile\tfunction\tbytes\tcareful\tminutes\tskip\n"
+            "1\tFGFoo.cpp\tUFoo::Tick\t300\t\t60\t\n"
+            "1\tFGFoo.cpp\tUFoo::Stuck\t100\t\t\t\n"
+            "1\tFGFoo.cpp\tAFoo::AFoo\t900\t\t\tengine drift: the base class grew\n")
+        rows = night.read_list(self.dir / "list.tsv")
+        by = {r.function: r for r in rows}
+        self.assertEqual(by["UFoo::Tick"].minutes, 60.0)
+        self.assertIsNone(by["UFoo::Stuck"].minutes)
+        self.assertEqual(by["AFoo::AFoo"].skip, "engine drift: the base class grew")
+        n, compiler = self.night(compiler=FakeCompiler(self.project, self.clock, win=False), minutes=4.0, hours=1.5)
+        state = n.run()
+        self.assertNotIn("AFoo::AFoo", state.functions)
+        self.assertFalse(any(f == "AFoo::AFoo" for f, _ in compiler.texts))
+        skipped = [line for line in self.logs if "AFoo::AFoo" in line]
+        self.assertEqual(len(skipped), 1)
+        self.assertIn("skipped: engine drift: the base class grew", skipped[0])
+        # one round each: Tick ran up to its 60 minutes, Stuck up to the default 4 (both may end early when out of
+        # candidates, never later)
+        tick, stuck = state.functions["UFoo::Tick"], state.functions["UFoo::Stuck"]
+        self.assertGreater(tick["seconds"] / tick["rounds"], 4 * 60 + 40)
+        self.assertLessEqual(stuck["seconds"] / stuck["rounds"], 4 * 60 + 2 * 40)
+        self.assertIn("of 2 (round", (self.results / "perf.txt").read_text())
+
+    def test_a_list_without_the_new_columns_still_reads(self):
+        rows = night.read_list(self.dir / "list.tsv")
+        self.assertTrue(all(r.minutes is None and not r.skip for r in rows))
+
     def test_targeted_rules_find_the_win_and_it_is_saved_with_its_chain(self):
         n, compiler = self.night(hours=0.5)
         state = n.run()
